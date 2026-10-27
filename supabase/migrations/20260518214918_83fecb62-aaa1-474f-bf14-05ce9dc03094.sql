@@ -1,0 +1,1 @@
+ALTER TABLE public.upload_batches ADD COLUMN IF NOT EXISTS issues_count integer NOT NULL DEFAULT 0;

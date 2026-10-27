@@ -1,0 +1,95 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Definition of the design system. All colors, gradients, fonts, etc should be defined here. 
+All colors MUST be HSL.
+*/
+
+@layer base {
+  :root {
+    /* Calm clinical palette: soft white, deep teal primary, semantic status colors */
+    --background: 210 33% 98%;
+    --foreground: 200 30% 12%;
+
+    --card: 0 0% 100%;
+    --card-foreground: 200 30% 12%;
+
+    --popover: 0 0% 100%;
+    --popover-foreground: 200 30% 12%;
+
+    --primary: 184 71% 28%;            /* teal #15807e */
+    --primary-foreground: 0 0% 100%;
+    --primary-soft: 184 55% 92%;
+
+    --secondary: 200 25% 94%;
+    --secondary-foreground: 200 30% 18%;
+
+    --muted: 210 25% 95%;
+    --muted-foreground: 210 12% 40%;
+
+    --accent: 184 55% 92%;
+    --accent-foreground: 184 71% 22%;
+
+    --destructive: 0 75% 50%;           /* خطر أحمر */
+    --destructive-foreground: 0 0% 100%;
+    --destructive-soft: 0 80% 96%;
+
+    --warning: 38 92% 50%;              /* تحذير أصفر */
+    --warning-foreground: 30 60% 15%;
+    --warning-soft: 45 100% 95%;
+
+    --success: 152 60% 36%;             /* آمن أخضر */
+    --success-foreground: 0 0% 100%;
+    --success-soft: 150 55% 93%;
+
+    --info: 210 80% 50%;
+    --info-soft: 210 80% 95%;
+
+    --border: 210 20% 88%;
+    --input: 210 20% 88%;
+    --ring: 184 71% 28%;
+
+    --radius: 0.75rem;
+
+    --sidebar-background: 0 0% 98%;
+
+    --sidebar-foreground: 240 5.3% 26.1%;
+
+    --sidebar-primary: 240 5.9% 10%;
+
+    --sidebar-primary-foreground: 0 0% 98%;
+
+    --sidebar-accent: 240 4.8% 95.9%;
+
+    --sidebar-accent-foreground: 240 5.9% 10%;
+
+    --sidebar-border: 220 13% 91%;
+
+    --sidebar-ring: 217.2 91.2% 59.8%;
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+
+  body {
+    @apply bg-background text-foreground font-arabic;
+    font-feature-settings: "kern", "liga";
+  }
+}
+
+@layer components {
+  .status-pill {
+    @apply inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-xs font-semibold;
+  }
+  .status-danger { @apply status-pill bg-destructive/10 text-destructive; }
+  .status-warning { @apply status-pill bg-warning/15 text-warning-foreground; }
+  .status-success { @apply status-pill bg-success/15 text-success; }
+  .status-info { @apply status-pill bg-info/15 text-info; }
+  .card-elevated {
+    @apply rounded-xl bg-card border border-border/60 shadow-sm;
+  }
+}

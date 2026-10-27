@@ -73,7 +73,7 @@ export default function DailyActionCenter() {
 
   useEffect(() => { (async () => {
     setLoading(true);
-    const d = await loadContinuousAnalysis({ monthsWindow, targetDays: target });
+    const d = await loadContinuousAnalysis({ monthsWindow, targetDays: target, groupBy: "sku" });
     setBatch(d.latestBatch); setRows(d.rows); setPreliminary(d.preliminary); setLoading(false);
     if (d.latestBatch) setDecisions(loadDecisions(d.latestBatch.id));
   })(); }, [monthsWindow, target]);
@@ -106,6 +106,7 @@ export default function DailyActionCenter() {
     rows.forEach((r) => { const a = byItem.get(r.itemKey) || []; a.push(r); byItem.set(r.itemKey, a); });
 
     for (const list of byItem.values()) {
+      if (list.some((row) => row.kind === "no_data")) continue;
       const s = list[0];
       const recItemKey = s.itemKey;
       const itemName = s.itemName, itemCode = s.itemCode;
@@ -283,7 +284,7 @@ export default function DailyActionCenter() {
         <div className="flex items-center justify-between gap-3 flex-wrap">
           <div>
             <h1 className="text-2xl font-bold">مركز العمل اليومي</h1>
-            <p className="text-sm text-muted-fg mt-1">قائمة قرارات بناءً على الرصيد المتوقع لليوم.</p>
+            <p className="text-sm text-muted-fg mt-1">قائمة قرارات بناءً على الرصيد المسجل والحركات الفعلية.</p>
           </div>
           <label className="text-sm flex items-center gap-2">
             <span className="text-muted-fg">نافذة:</span>

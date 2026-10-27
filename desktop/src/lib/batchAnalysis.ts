@@ -1,3 +1,4 @@
+import { locationKey, monthDays, numericValue } from "../../../shared/inventoryHistory";
 import { supabase } from "@/integrations/supabase/client";
 import { classifyStatus, isMainLocation as isMainLoc, type AlertKind } from "./statusRules";
 
@@ -81,19 +82,25 @@ function classify(days: number | null, balance: number, issued: number, target: 
 }
 
 export function analyzeMovements(movements: Movement[], targetDays = 30): AnalysisRow[] {
-  const groups = new Map<string, { sample: Movement; balance: number; issued: number }>();
+  const groups = new Map<string, { sample: Movement; balance: number; issued: number; adc: number; hasBalance: boolean; hasIssued: boolean }>();
   for (const m of movements) {
-    const key = `${itemKey(m)}|${normalize(m.location_type)}|${normalize(m.location_name)}`;
+    const key = `${itemKey(m)}|${locationKey(m.location_name, m.location_type)}`;
     const cur = groups.get(key);
     const issued = num(m.issued_quantity);
     const balance = num(m.current_balance);
-    if (!cur) groups.set(key, { sample: m, balance, issued });
-    else { cur.balance = balance; cur.issued += issued; }
+    const hasBalance = numericValue(m.current_balance) != null;
+    const hasIssued = numericValue(m.issued_quantity) != null;
+    const daily = issued / (monthDays(m.month) || 30);
+    if (!cur) groups.set(key, { sample: m, balance, issued, adc: daily, hasBalance, hasIssued });
+    else { cur.balance += balance; cur.issued += issued;
+      cur.adc += daily;
+      cur.hasBalance &&= hasBalance;
+      cur.hasIssued &&= hasIssued; }
   }
   return Array.from(groups.values()).map((g) => {
-    const adc = g.issued / 30;
+    const adc = g.adc;
     const days = adc > 0 ? g.balance / adc : null;
-    const kind = classify(days, g.balance, g.issued, targetDays, g.sample.location_type);
+    const kind = !g.hasBalance || !g.hasIssued ? "no_data" : classify(days, g.balance, g.issued, targetDays, g.sample.location_type);
     let why = "الرصيد ضمن حدود التغطية المطلوبة.";
     let action = "لا يوجد إجراء عاجل.";
     if (kind === "critical" || kind === "danger" || kind === "below") {

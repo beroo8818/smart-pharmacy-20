@@ -1,3 +1,5 @@
+import { planTransfers } from "../../../shared/transferPlan";
+import { locationKey, monthDays, numericValue } from "../../../shared/inventoryHistory";
 
 import type { Movement, UploadBatch } from "@/integrations/desktop/client";
 
@@ -164,6 +166,7 @@ export type AnalysisRow = {
   itemName: string;
   tradeNames: string[];
   itemCode: string | null;
+  unit?: string | null;
   locationName: string;
   locationType: string;
   balance: number;
@@ -194,8 +197,8 @@ function classifyBranch(days: number | null, balance: number, issued: number, ta
   if (days < 7) return "critical";
   if (days < 14) return "danger";
   if (days < targetDays) return "below";
-  if (days < targetDays * 2) return "safe";
-  if (days < targetDays * 3) return "over";
+  if (days <= targetDays * 2) return "safe";
+  if (days <= targetDays * 3) return "over";
   return "very_over";
 }
 
@@ -213,17 +216,23 @@ function classifyMain(days: number | null, balance: number, branchAdc: number, t
 }
 
 export function analyzeMovements(movements: Movement[], targetDays = 30): AnalysisRow[] {
-  const groups = new Map<string, { sample: Movement; balance: number; issued: number; tradeNames: Set<string> }>();
+  const groups = new Map<string, { sample: Movement; balance: number; issued: number; adc: number; hasBalance: boolean; hasIssued: boolean; tradeNames: Set<string> }>();
   for (const m of movements) {
-    const key = `${itemKey(m)}|${normalize(m.location_type)}|${normalize(m.location_name)}`;
+    const key = `${itemKey(m)}|${locationKey(m.location_name, m.location_type)}`;
     const cur = groups.get(key);
     const issued = num(m.issued_qty);
     const balance = num(m.closing_balance);
+    const hasBalance = numericValue(m.closing_balance) != null;
+    const hasIssued = numericValue(m.issued_qty) != null;
+    const daily = issued / (monthDays(m.month) || 30);
     const names = itemTradeNames(m);
-    if (!cur) groups.set(key, { sample: m, balance, issued, tradeNames: new Set(names) });
+    if (!cur) groups.set(key, { sample: m, balance, issued, adc: daily, hasBalance, hasIssued, tradeNames: new Set(names) });
     else {
       cur.balance += balance;
       cur.issued += issued;
+      cur.adc += daily;
+      cur.hasBalance &&= hasBalance;
+      cur.hasIssued &&= hasIssued;
       names.forEach((n) => cur.tradeNames.add(n));
     }
   }
@@ -231,16 +240,16 @@ export function analyzeMovements(movements: Movement[], targetDays = 30): Analys
   for (const g of groups.values()) {
     if (isMainLocation(g.sample.location_type)) continue;
     const k = itemKey(g.sample);
-    branchAdcByItem.set(k, (branchAdcByItem.get(k) || 0) + g.issued / 30);
+    branchAdcByItem.set(k, (branchAdcByItem.get(k) || 0) + g.adc);
   }
 
   return Array.from(groups.values()).map((g) => {
     const itemK = itemKey(g.sample);
     const isMain = isMainLocation(g.sample.location_type);
     const branchAdc = branchAdcByItem.get(itemK) || 0;
-    const adc = isMain ? branchAdc : g.issued / 30;
+    const adc = isMain ? branchAdc : g.adc;
     const days = adc > 0 ? g.balance / adc : null;
-    const kind = isMain ? classifyMain(days, g.balance, branchAdc, targetDays) : classifyBranch(days, g.balance, g.issued, targetDays);
+    const kind = !g.hasBalance || (!isMain && !g.hasIssued) ? "no_data" : isMain ? classifyMain(days, g.balance, branchAdc, targetDays) : classifyBranch(days, g.balance, g.issued, targetDays);
     const severity: AnalysisRow["severity"] = kind === "critical" || kind === "danger" ? "high" : kind === "below" || kind === "very_over" ? "medium" : "low";
     let why = "الرصيد ضمن حدود التغطية المطلوبة.";
     let action = "لا يوجد إجراء عاجل.";
@@ -269,6 +278,7 @@ export function analyzeMovements(movements: Movement[], targetDays = 30): Analys
       itemName: itemDisplayName(g.sample),
       tradeNames: Array.from(g.tradeNames),
       itemCode: g.sample.item_code,
+      unit: g.sample.unit,
       locationName: g.sample.location_name,
       locationType: g.sample.location_type,
       balance: g.balance,
@@ -287,33 +297,11 @@ export function analyzeMovements(movements: Movement[], targetDays = 30): Analys
 }
 
 export function suggestTransfers(rows: AnalysisRow[], targetDays = 30): TransferRow[] {
-  const byItem = new Map<string, AnalysisRow[]>();
-  for (const r of rows) {
-    const list = byItem.get(r.itemKey) || [];
-    list.push(r);
-    byItem.set(r.itemKey, list);
-  }
-  const out: TransferRow[] = [];
-  for (const list of byItem.values()) {
-    const needy = list.filter((r) => !isMainLocation(r.locationType) && ["critical", "danger", "below"].includes(r.kind));
-    const donors = list.filter((r) => (isMainLocation(r.locationType) || r.kind === "over" || r.kind === "very_over") && r.balance > 0)
-      .sort((a, b) => b.balance - a.balance);
-    for (const need of needy) {
-      let required = Math.max(0, Math.ceil(need.adc * targetDays - need.balance));
-      for (const donor of donors) {
-        if (required <= 0 || donor.locationName === need.locationName) continue;
-        const donorKeep = donor.adc > 0 ? donor.adc * targetDays : 0;
-        const available = Math.max(0, Math.floor(donor.balance - donorKeep));
-        const qty = Math.min(required, available);
-        if (qty > 0) {
-          out.push({ itemName: need.itemName, tradeNames: need.tradeNames, itemCode: need.itemCode, from: donor.locationName, to: need.locationName, qty, reason: need.why });
-          donor.balance -= qty;
-          required -= qty;
-        }
-      }
-    }
-  }
-  return out.sort((a, b) => b.qty - a.qty);
+  return planTransfers(rows, targetDays).map((plan) => ({
+    itemName: plan.to.itemName, tradeNames: plan.to.tradeNames, itemCode: plan.to.itemCode,
+    from: plan.from.locationName, to: plan.to.locationName, qty: plan.qty,
+    reason: `اقتراح يحتاج اعتمادًا ومراجعة الرصيد والصلاحية. المتبقي لدى المصدر ${fmtNum(plan.fromAfter)} ${plan.from.unit || ""}.`,
+  }));
 }
 
 export async function loadLatestDataset(api: any, token: string) {

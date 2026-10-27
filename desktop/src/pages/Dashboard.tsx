@@ -79,7 +79,7 @@ export default function Dashboard() {
         <div className="flex items-center justify-between gap-3 flex-wrap">
           <div>
             <h1 className="text-2xl font-bold">اللوحة الرئيسية</h1>
-            <p className="text-sm text-muted-fg mt-1">رصيد متوقع لليوم بناءً على آخر الملفات + الحركات.</p>
+            <p className="text-sm text-muted-fg mt-1">آخر أرصدة مسجلة لكل صنف وموقع مع الحركات الفعلية. التوقع ليس جردًا فعليًا.</p>
           </div>
           <label className="text-sm flex items-center gap-2">
             <span className="text-muted-fg">نافذة التحليل:</span>
@@ -123,8 +123,8 @@ export default function Dashboard() {
           </div>
 
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-8">
-            <StatCard label="إجمالي رصيد الصيدليات الفرعية" value={fmtNum(totalBranch)} tone="info" />
-            <StatCard label="إجمالي رصيد المخزن الرئيسي" value={fmtNum(totalMain)} tone="success" />
+            <StatCard label="سجلات الأصناف في الفروع" value={fmtNum(branchRows.length)} tone="info" />
+            <StatCard label="سجلات الأصناف في المخزن" value={fmtNum(mainRows.length)} tone="success" />
           </div>
 
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">

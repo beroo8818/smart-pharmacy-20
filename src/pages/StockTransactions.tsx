@@ -20,7 +20,7 @@ const TYPES: { value: TxnType; label: string; needs: { from: boolean; to: boolea
   { value: "warehouse_issue_to_pharmacy", label: TXN_LABEL.warehouse_issue_to_pharmacy, needs: { from: true, to: true } },
   { value: "pharmacy_issue", label: TXN_LABEL.pharmacy_issue, needs: { from: true, to: false } },
   { value: "pharmacy_transfer", label: TXN_LABEL.pharmacy_transfer, needs: { from: true, to: true } },
-  { value: "warehouse_return", label: TXN_LABEL.warehouse_return, needs: { from: true, to: false } },
+  { value: "warehouse_return", label: TXN_LABEL.warehouse_return, needs: { from: true, to: true } },
   { value: "pharmacy_return_to_warehouse", label: TXN_LABEL.pharmacy_return_to_warehouse, needs: { from: true, to: true } },
 ];
 
@@ -78,7 +78,7 @@ export default function StockTransactions() {
       ? (txnType === "warehouse_issue_to_pharmacy" ? "main_warehouse" : "sub_pharmacy")
       : (cfg.needs.from ? "sub_pharmacy" : null);
     const toType = cfg.needs.to
-      ? (txnType === "warehouse_receipt" || txnType === "pharmacy_return_to_warehouse" ? "main_warehouse" : "sub_pharmacy")
+      ? (txnType === "warehouse_receipt" || txnType === "warehouse_return" || txnType === "pharmacy_return_to_warehouse" ? "main_warehouse" : "sub_pharmacy")
       : null;
 
     setBusy(true);

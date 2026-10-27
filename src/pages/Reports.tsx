@@ -1,3 +1,4 @@
+import { loadContinuousAnalysis } from "@/lib/continuousAnalysis";
 import PageHeader from "@/components/PageHeader";
 import DataSourceCard from "@/components/DataSourceCard";
 import { Card } from "@/components/ui/card";
@@ -150,21 +151,10 @@ export default function Reports() {
   const [prioFilter, setPrioFilter] = useState<"all" | Priority>("all");
   const { isVital } = useVitalSet();
 
-  const batchQ = useQuery({
-    queryKey: ["latest-batch-reports"],
-    queryFn: fetchLatestBatch,
-    staleTime: 0,
-  });
-  const batch = batchQ.data || null;
-
-  const movQ = useQuery({
-    queryKey: ["movements-reports", batch?.id],
-    enabled: !!batch?.id,
-    queryFn: () => fetchMovementsByBatch(batch!.id),
-    staleTime: 0,
-  });
-  const movements = movQ.data || [];
-  const rows: AnalysisRow[] = useMemo(() => analyzeMovements(movements, target), [movements, target]);
+  const datasetQ = useQuery({ queryKey: ["reports-current-history", target], queryFn: () => loadContinuousAnalysis({ targetDays: target, groupBy: "sku" }), staleTime: 0 });
+  const batch = datasetQ.data?.latestBatch || null;
+  const rows: AnalysisRow[] = datasetQ.data?.rows || [];
+  const movements = rows;
 
   const dqQ = useQuery({
     queryKey: ["dq-issues", batch?.id],
@@ -198,7 +188,7 @@ export default function Reports() {
     staleTime: 0,
   });
 
-  const loading = batchQ.isLoading || movQ.isLoading;
+  const loading = datasetQ.isLoading;
 
   const reports = useMemo(() => {
     // Attach computed priority to each row (per-location)
@@ -318,7 +308,7 @@ export default function Reports() {
         };
         for (const ph of pharmacies) {
           const r = list.find((x) => x.locationName === ph && !isMainLocation(x.locationType));
-          row[ph] = r ? r.balance : 0;
+          row[ph] = r ? r.balance : "غير مسجل";
         }
         row["إجمالي الصيدليات"] = branchBalance;
         out.push(row);
@@ -339,6 +329,7 @@ export default function Reports() {
       rows.forEach(r => { const list = byItem.get(r.itemKey) || []; list.push(r); byItem.set(r.itemKey, list); });
       const out: any[] = [];
       for (const list of byItem.values()) {
+        if (list.some((row) => row.kind === "no_data")) continue;
         const main = list.find(r => isMainLocation(r.locationType));
         if (!main || main.balance <= 0) continue;
         const branches = list.filter(r => !isMainLocation(r.locationType));
@@ -563,7 +554,7 @@ export default function Reports() {
     <div className="p-8 max-w-[1200px]">
       <PageHeader
         title="التقارير"
-        description="كل التقارير مبنية على آخر ملف محفوظ (upload_batches + inventory_movements) وقابلة للتصدير إلى Excel."
+        description="التقارير مبنية على آخر رصيد لكل صنف وموقع والحركات المسجلة. راجع تواريخ الرصيد والوحدات قبل اعتماد أي تحويل."
         actions={
           <div className="flex gap-2">
             <select className="rounded-md border border-input bg-background px-3 h-9 text-sm"

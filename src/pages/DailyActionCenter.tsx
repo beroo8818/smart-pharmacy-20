@@ -207,7 +207,7 @@ export default function DailyActionCenter() {
 
   const contQ = useQuery({
     queryKey: ["continuous-dac", target],
-    queryFn: () => loadContinuousAnalysis({ targetDays: target, monthsWindow: 3 }),
+    queryFn: () => loadContinuousAnalysis({ targetDays: target, monthsWindow: 3, groupBy: "sku" }),
     staleTime: 0,
   });
   const continuous = contQ.data;
@@ -253,6 +253,7 @@ export default function DailyActionCenter() {
     rows.forEach((r) => { const a = byItem.get(r.itemKey) || []; a.push(r); byItem.set(r.itemKey, a); });
 
     for (const list of byItem.values()) {
+      if (list.some((row) => row.kind === "no_data")) continue;
       const itemSample = list[0];
       const recItemKey = itemSample.itemKey;
       const itemName = itemSample.itemName;
@@ -602,7 +603,7 @@ export default function DailyActionCenter() {
     <div className="p-8 max-w-[1400px]">
       <PageHeader
         title="مركز العمل اليومي"
-        description="تحليل مستمر بالرصيد المتوقع اليوم — يدمج آخر snapshot مع الحركات اليومية."
+        description="تحليل آخر رصيد لكل صنف وموقع مع الحركات الفعلية. يجب التحقق من الرصيد والصلاحية قبل التنفيذ."
       />
 
       {preliminary && (

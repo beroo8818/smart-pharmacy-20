@@ -1,3 +1,4 @@
+import Consumption from "./pages/Consumption";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { HashRouter, Route, Routes, Navigate } from "react-router-dom";
 import { Toaster as Sonner } from "@/components/ui/sonner";
@@ -69,6 +70,7 @@ const App = () => (
               { path: "/active-ingredients", el: <ActiveIngredients /> },
               { path: "/active-ingredients/group/:key", el: <ActiveIngredientGroup /> },
               { path: "/items", el: <Items /> },
+              { path: "/consumption", el: <Consumption /> },
               { path: "/items/:id", el: <ItemDetail /> },
               { path: "/alerts", el: <Alerts /> },
               { path: "/transfers", el: <Transfers /> },

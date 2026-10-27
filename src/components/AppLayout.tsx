@@ -45,6 +45,7 @@ const nav = [
   { to: "/dictionary", label: "قاموس الأصناف", icon: BookOpen },
   { to: "/active-ingredients", label: "قاموس المواد الفعالة", icon: FlaskConical },
   { to: "/items", label: "تحليل الأصناف", icon: Pill },
+  { to: "/consumption", label: "منصرف المستشفى", icon: Pill },
   { to: "/alerts", label: "التنبيهات", icon: Bell },
   { to: "/transfers", label: "التحويلات المقترحة", icon: ArrowLeftRight },
   { to: "/stock-transactions", label: "سجل الحركات اليومية", icon: Activity },

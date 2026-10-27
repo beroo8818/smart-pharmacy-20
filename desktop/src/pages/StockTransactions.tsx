@@ -9,7 +9,7 @@ const TYPES: { value: StockTxnType; needs: { from: boolean; to: boolean }; fromT
   { value: "warehouse_issue_to_pharmacy", needs: { from: true, to: true }, fromType: "main_warehouse", toType: "sub_pharmacy" },
   { value: "pharmacy_issue", needs: { from: true, to: false }, fromType: "sub_pharmacy" },
   { value: "pharmacy_transfer", needs: { from: true, to: true }, fromType: "sub_pharmacy", toType: "sub_pharmacy" },
-  { value: "warehouse_return", needs: { from: true, to: false }, fromType: "sub_pharmacy" },
+  { value: "warehouse_return", needs: { from: true, to: true }, fromType: "sub_pharmacy", toType: "main_warehouse" },
   { value: "pharmacy_return_to_warehouse", needs: { from: true, to: true }, fromType: "sub_pharmacy", toType: "main_warehouse" },
 ];
 

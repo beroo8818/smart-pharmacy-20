@@ -1,3 +1,4 @@
+import { loadContinuousAnalysis, type ProjectedRow } from "@/lib/continuousAnalysis";
 
 import { useEffect, useMemo, useState } from "react";
 import * as XLSX from "xlsx";
@@ -12,11 +13,11 @@ function exportXlsx(name: string, rows: Record<string, unknown>[]) {
 }
 
 export default function Reports(){
- const [batch,setBatch]=useState<UploadBatch|null>(null); const [movements,setMovements]=useState<Movement[]>([]); const [loading,setLoading]=useState(true);
- useEffect(()=>{(async()=>{const d=await loadLatestDataset(api, tokenStore.get()); setBatch(d.batch); setMovements(d.movements); setLoading(false);})()},[]);
- const rows=useMemo(()=>analyzeMovements(movements,30),[movements]); const transfers=useMemo(()=>suggestTransfers(rows,30),[rows]);
+ const [batch,setBatch]=useState<UploadBatch|null>(null); const [rows,setRows]=useState<ProjectedRow[]>([]); const [loading,setLoading]=useState(true);
+ useEffect(()=>{(async()=>{const d=await loadContinuousAnalysis({ groupBy: "sku" }); setBatch(d.latestBatch); setRows(d.rows); setLoading(false);})()},[]);
+ const transfers=useMemo(()=>suggestTransfers(rows,30),[rows]);
  const reports = [
-  { title:"تقرير حالة المخزون", desc:"كل صنف وموقع مع الرصيد وأيام التغطية", build:()=>rows.map(r=>({الصنف:r.itemName,الاسم_التجاري:r.tradeNames.join("، "),الكود:r.itemCode,الموقع:r.locationName,الرصيد:r.balance,المنصرف:r.issued,أيام_التغطية:r.days,الحالة:KIND_LABEL[r.kind],الإجراء:r.action})) },
+  { title:"تقرير حالة المخزون", desc:"كل صنف وموقع مع الرصيد وأيام التغطية", build:()=>rows.map(r=>({الصنف:r.itemName,الاسم_التجاري:r.tradeNames.join("، "),الكود:r.itemCode,الموقع:r.locationName,الوحدة:r.unit,تاريخ_الرصيد:r.snapshotDate,الرصيد:r.balance,المنصرف_المعياري_30_يوما:r.issued,أيام_التغطية:r.days,الحالة:KIND_LABEL[r.kind],الإجراء:r.action})) },
   { title:"تقرير النقص", desc:"الأصناف الحرجة والأقل من الهدف", build:()=>rows.filter(r=>["critical","danger","below"].includes(r.kind)).map(r=>({الصنف:r.itemName,الاسم_التجاري:r.tradeNames.join("، "),الموقع:r.locationName,الرصيد:r.balance,المنصرف:r.issued,السبب:r.why,الإجراء:r.action})) },
   { title:"تقرير الزيادة", desc:"الأصناف ذات رصيد أعلى من الاحتياج", build:()=>rows.filter(r=>["over","very_over"].includes(r.kind)).map(r=>({الصنف:r.itemName,الاسم_التجاري:r.tradeNames.join("، "),الموقع:r.locationName,الرصيد:r.balance,أيام_التغطية:r.days,الإجراء:r.action})) },
   { title:"تقرير الراكد", desc:"رصيد موجود بدون صرف في الملف الحالي", build:()=>rows.filter(r=>r.kind==="deadstock").map(r=>({الصنف:r.itemName,الاسم_التجاري:r.tradeNames.join("، "),الموقع:r.locationName,الرصيد:r.balance,الإجراء:r.action})) },

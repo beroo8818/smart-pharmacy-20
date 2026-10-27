@@ -10,8 +10,8 @@ export interface UploadBatch {
 
 export interface Movement {
   id: string; upload_batch_id: string; item_master_id: string; location_id: string;
-  month: string; opening_balance: number; received_qty: number; issued_qty: number;
-  closing_balance: number; unit_price: number | null; expiry_date: string | null;
+  month: string; opening_balance: number; received_qty: number; issued_qty: number | null;
+  closing_balance: number | null; unit_price: number | null; expiry_date: string | null;
   min_stock: number | null; max_stock: number | null; lead_time_days: number | null;
   item_code: string | null; item_name_ar: string | null; item_name_en: string | null;
   active_ingredient_ar: string | null; strength: string | null;

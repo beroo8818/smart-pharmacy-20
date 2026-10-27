@@ -41,7 +41,7 @@ export function classifyStatus(input: ClassifyInput): AlertKind {
   // رصيد بدون صرف.
   if (issued === 0 && balance > 0) {
     // المخزن الرئيسي: رصيد بدون صرف بالفروع → يحتاج مراجعة (نعرضه كـ over لا راكد).
-    if (main) return "over";
+    if (main) return "no_data";
     return "deadstock"; // راكد على مستوى الصيدلية الفرعية فقط.
   }
 

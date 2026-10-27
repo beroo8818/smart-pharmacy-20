@@ -1,3 +1,4 @@
+import { loadContinuousAnalysis, type ProjectedRow } from "@/lib/continuousAnalysis";
 import { useEffect, useMemo, useState } from "react";
 import { api, tokenStore, Movement, UploadBatch } from "@/integrations/desktop/client";
 import { analyzeMovements, fmtMonth, fmtNum, loadLatestDataset, suggestTransfers, normalize } from "@/lib/desktopAnalytics";
@@ -9,23 +10,23 @@ import { ArrowLeft } from "lucide-react";
 
 export default function Transfers() {
   const [batch, setBatch] = useState<UploadBatch | null>(null);
-  const [movements, setMovements] = useState<Movement[]>([]);
+  const [rows, setRows] = useState<ProjectedRow[]>([]);
   const [target, setTarget] = useState(30);
   const [loading, setLoading] = useState(true);
   const [q, setQ] = useState("");
 
   useEffect(() => {
     (async () => {
-      const d = await loadLatestDataset(api, tokenStore.get());
-      setBatch(d.batch);
-      setMovements(d.movements);
+      const d = await loadContinuousAnalysis({ targetDays: target, groupBy: "sku" });
+      setBatch(d.latestBatch);
+      setRows(d.rows);
       setLoading(false);
     })();
-  }, []);
+  }, [target]);
 
   const transfers = useMemo(
-    () => suggestTransfers(analyzeMovements(movements, target), target),
-    [movements, target]
+    () => suggestTransfers(rows, target),
+    [rows, target]
   );
 
   const filtered = useMemo(() => {
@@ -74,7 +75,7 @@ export default function Transfers() {
       {batch && (
         <Card className="p-4 mb-4 text-sm border-primary/20 bg-primary/5">
           <div className="font-medium text-primary">
-            مصدر التحليل: ملف {batch.file_name}، شهر {fmtMonth(batch.month)}، عدد الصفوف {fmtNum(batch.rows_saved)}
+            مصدر التحليل: ملف {batch.file_name}، شهر {fmtMonth(batch.month)}، عدد الصفوف {fmtNum(batch.row_count)}
           </div>
         </Card>
       )}

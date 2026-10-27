@@ -1,3 +1,5 @@
+import { planTransfers } from "../../shared/transferPlan";
+import { loadContinuousAnalysis } from "@/lib/continuousAnalysis";
 import PageHeader from "@/components/PageHeader";
 import { Card } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -78,184 +80,28 @@ export default function Transfers() {
   const selectedBatchId = batchFromUrl || latestBatch?.id || null;
   const selectedBatch = batches.find((b) => b.id === selectedBatchId) || null;
 
-  const movementsQuery = useQuery({
-    queryKey: ["inventory_movements_transfers", selectedBatchId],
-    enabled: !!selectedBatchId,
-    staleTime: 0, refetchOnMount: "always",
-    queryFn: () => fetchMovementsByBatch(selectedBatchId!) as Promise<InventoryMovement[]>,
+  const datasetQ = useQuery({
+    queryKey: ["transfer-history", batchFromUrl, target],
+    queryFn: () => loadContinuousAnalysis({ targetDays: target, groupBy: "sku", batchIds: batchFromUrl ? [batchFromUrl] : undefined }),
   });
-
-  const movements = useMemo(() => movementsQuery.data || [], [movementsQuery.data]);
-
-  const suggestions = useMemo<Suggestion[]>(() => {
-    if (!movements.length) return [];
-
-    // Group by item -> per location aggregation
-    const byItem = new Map<string, { sample: InventoryMovement; tradeNames: Set<string>; locs: Map<string, LocAgg> }>();
-    for (const m of movements) {
-      const k = itemKey(m);
-      if (!byItem.has(k)) byItem.set(k, { sample: m, tradeNames: new Set(itemTradeNames(m as any)), locs: new Map() });
-      const entry = byItem.get(k)!;
-      itemTradeNames(m as any).forEach((n) => entry.tradeNames.add(n));
-      const lkey = normalize(`${m.location_type}|${m.location_name}`);
-      const issued = num(m.issued_quantity);
-      const balance = num(m.current_balance);
-      const cur = entry.locs.get(lkey);
-      if (!cur) {
-        entry.locs.set(lkey, {
-          name: m.location_name, type: m.location_type,
-          balance, amc: issued, adc: issued / 30,
-          days: issued > 0 ? balance / (issued / 30) : null,
-        });
-      } else {
-        cur.balance += balance; cur.amc += issued; cur.adc = cur.amc / 30;
-        cur.days = cur.adc > 0 ? cur.balance / cur.adc : null;
-      }
-    }
-
-    const out: Suggestion[] = [];
-
-    for (const [, { sample, tradeNames, locs }] of byItem) {
-      const itemName = itemDisplayName(sample as any);
-      const itemTradeNameList = Array.from(tradeNames);
-      const list = Array.from(locs.values());
-      const branches = list.filter((l) => !isMain(l.type));
-      const mains = list.filter((l) => isMain(l.type));
-
-      // Total daily consumption across all branches for this item
-      const totalBranchAdc = branches.reduce((s, b) => s + (b.adc || 0), 0);
-      // Required safety reserve in main store = total branches daily consumption × target days
-      const mainReserve = totalBranchAdc * target;
-
-      // Needs and surplus on branches only
-      const needs = branches
-        .filter((b) => b.adc > 0 && b.days != null && b.days < target)
-        .map((b) => ({
-          loc: b,
-          needed: Math.max(0, Math.ceil(b.adc * target - b.balance)),
-        }))
-        .filter((n) => n.needed > 0)
-        .sort((a, b) => (a.loc.days ?? 0) - (b.loc.days ?? 0));
-
-      // Mutable balances for main stores, with coverage computed against branches' total adc
-      const mainState = mains.map((m) => ({
-        ...m,
-        // main store coverage = balance / total branches daily consumption
-        days: totalBranchAdc > 0 ? m.balance / totalBranchAdc : null,
-      }));
-
-      for (const n of needs) {
-        let remaining = n.needed;
-        const toBeforeDays = n.loc.days;
-        const toBeforeBal = n.loc.balance;
-        // Compute "main blocked" explanation up front (for use in donor-branch reasons)
-        const mainBlockedReasons: string[] = [];
-        for (const ms of mainState) {
-          if (ms.balance <= 0) continue;
-          const available = Math.floor(ms.balance - mainReserve);
-          if (available <= 0) {
-            mainBlockedReasons.push(
-              `لم يتم اقتراح الصرف من المخزن (${ms.name}) لأن رصيده ${fmtNum(ms.balance)} يغطي ${ms.days?.toFixed(0) ?? "—"} يوم فقط، والحد الآمن ${target} يوم.`
-            );
-          }
-        }
-
-        // 1) Try main store(s) first
-        for (const ms of mainState) {
-          if (remaining <= 0) break;
-          if (ms.balance <= 0) continue;
-          // Available to dispense = balance - required reserve. Never dip into reserve.
-          const available = Math.max(0, Math.floor(ms.balance - mainReserve));
-          if (available <= 0) continue;
-          const giveable = Math.min(remaining, available);
-          if (giveable <= 0) continue;
-          const fromBefore = { balance: ms.balance, days: ms.days };
-          const newToBal = n.loc.balance + giveable;
-          const newToDays = n.loc.adc > 0 ? newToBal / n.loc.adc : null;
-          const newFromBal = ms.balance - giveable;
-          const newFromDays = totalBranchAdc > 0 ? newFromBal / totalBranchAdc : null;
-          ms.balance = newFromBal;
-          ms.days = newFromDays;
-          n.loc.balance = newToBal;
-
-          const sev: "high" | "medium" | "low" =
-            (toBeforeDays != null && toBeforeDays < 7) ? "high"
-              : (toBeforeDays != null && toBeforeDays < 14) ? "medium" : "low";
-
-          out.push({
-            itemName, tradeNames: itemTradeNameList, itemCode: sample.item_code, unit: sample.unit,
-            from: ms.name, fromType: "main",
-            to: n.loc.name,
-            qty: giveable,
-            reason: `الصيدلية ${n.loc.name} تغطي ${toBeforeDays?.toFixed(0)} يوم. المخزن الرئيسي رصيده ${fmtNum(fromBefore.balance)} ويحتاج احتياطي ${fmtNum(Math.ceil(mainReserve))} (${fmtNum(Math.round(totalBranchAdc * 10) / 10)}/يوم × ${target} يوم) — متاح للصرف ${fmtNum(Math.floor(fromBefore.balance - mainReserve))}.`,
-            fromBefore, fromAfter: { balance: newFromBal, days: null },
-            // re-emit with actual days
-            toBefore: { balance: toBeforeBal, days: toBeforeDays },
-            toAfter: { balance: newToBal, days: newToDays },
-            uploadBatchId: sample.upload_batch_id,
-            priority: sev,
-          });
-          // patch fromAfter days now that we know the coverage
-          out[out.length - 1].fromAfter.days = newFromDays;
-          remaining -= giveable;
-        }
-
-        if (remaining <= 0) continue;
-
-        // 2) Donor branches with surplus
-        const donors = branches
-          .filter((b) => b !== n.loc && b.adc > 0 && b.days != null && b.days > 2 * target)
-          .map((b) => ({
-            loc: b,
-            surplus: Math.max(0, Math.floor(b.balance - b.adc * target)),
-          }))
-          .filter((d) => d.surplus > 0)
-          .sort((a, b) => b.surplus - a.surplus);
-
-        for (const d of donors) {
-          if (remaining <= 0) break;
-          const giveable = Math.min(remaining, d.surplus);
-          if (giveable <= 0) continue;
-
-          const fromBeforeBal = d.loc.balance;
-          const fromBeforeDays = d.loc.days;
-          const newFromBal = d.loc.balance - giveable;
-          const newFromDays = d.loc.adc > 0 ? newFromBal / d.loc.adc : null;
-          // do not let donor fall under target
-          if (newFromDays != null && newFromDays < target) continue;
-
-          const newToBal = n.loc.balance + giveable;
-          const newToDays = n.loc.adc > 0 ? newToBal / n.loc.adc : null;
-
-          d.loc.balance = newFromBal; d.loc.days = newFromDays;
-          n.loc.balance = newToBal;
-
-          const sev: "high" | "medium" | "low" =
-            (toBeforeDays != null && toBeforeDays < 7) ? "high"
-              : (toBeforeDays != null && toBeforeDays < 14) ? "medium" : "low";
-
-          out.push({
-            itemName, tradeNames: itemTradeNameList, itemCode: sample.item_code, unit: sample.unit,
-            from: d.loc.name, fromType: "branch",
-            to: n.loc.name,
-            qty: giveable,
-            reason: (mainBlockedReasons.length ? mainBlockedReasons.join(" ") + " " : "") +
-              `فائض في ${d.loc.name} (تغطية ${fromBeforeDays?.toFixed(0)} يوم) ونقص في ${n.loc.name} (تغطية ${toBeforeDays?.toFixed(0)} يوم).`,
-            fromBefore: { balance: fromBeforeBal, days: fromBeforeDays },
-            fromAfter: { balance: newFromBal, days: newFromDays },
-            toBefore: { balance: toBeforeBal, days: toBeforeDays },
-            toAfter: { balance: newToBal, days: newToDays },
-            uploadBatchId: sample.upload_batch_id,
-            priority: sev,
-          });
-          remaining -= giveable;
-        }
-      }
-    }
-
-    const rank: Record<string, number> = { high: 0, medium: 1, low: 2 };
-    return out.sort((a, b) => rank[a.priority] - rank[b.priority]);
-  }, [movements, target]);
+  const movements = datasetQ.data?.rows || [];
+  const suggestions = useMemo<Suggestion[]>(() => planTransfers(movements, target).map((plan) => {
+    const donorAdc = plan.from.adc;
+    const recipientAdc = plan.to.adc;
+    const days = (balance: number, adc: number) => adc > 0 ? balance / adc : null;
+    return {
+      itemName: plan.to.itemName, tradeNames: plan.to.tradeNames, itemCode: plan.to.itemCode, unit: plan.to.unit,
+      from: plan.from.locationName, fromType: isMain(plan.from.locationType) ? "main" : "branch",
+      to: plan.to.locationName, qty: plan.qty,
+      reason: `اقتراح يحتاج مراجعة الرصيد والصلاحية واعتماد المسؤول. تاريخ المصدر ${plan.from.snapshotDate}، الوجهة ${plan.to.snapshotDate}. احتياطي المصدر محفوظ.`,
+      fromBefore: { balance: plan.fromBefore, days: days(plan.fromBefore, donorAdc) },
+      fromAfter: { balance: plan.fromAfter, days: days(plan.fromAfter, donorAdc) },
+      toBefore: { balance: plan.toBefore, days: days(plan.toBefore, recipientAdc) },
+      toAfter: { balance: plan.toAfter, days: days(plan.toAfter, recipientAdc) },
+      uploadBatchId: selectedBatchId || "",
+      priority: plan.to.days != null && plan.to.days < 7 ? "high" : plan.to.days != null && plan.to.days < 14 ? "medium" : "low",
+    };
+  }), [movements, target, selectedBatchId]);
 
   const filtered = useMemo(() => {
     const s = normalize(q);
@@ -263,7 +109,7 @@ export default function Transfers() {
     return suggestions.filter((x) => normalize(`${x.itemName} ${x.tradeNames.join(" ")} ${x.itemCode || ""} ${x.from} ${x.to}`).includes(s));
   }, [suggestions, q]);
 
-  const loading = batchesQuery.isLoading || movementsQuery.isLoading;
+  const loading = batchesQuery.isLoading || datasetQ.isLoading;
   const noData = !loading && (!selectedBatchId || movements.length === 0);
 
   return (

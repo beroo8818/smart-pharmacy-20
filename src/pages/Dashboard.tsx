@@ -79,94 +79,19 @@ export default function Dashboard() {
   const projectedHighConf = (projected?.rows || []).filter((r) => r.confidence === "high").length;
   const projectedTotal = projected?.rows.length || 0;
 
-  const batchesQuery = useQuery({
-    queryKey: ["upload_batches_dashboard"],
-    staleTime: 0, refetchOnMount: "always", refetchOnWindowFocus: true,
-    queryFn: async () => {
-      const { data, error } = await db.from("upload_batches")
-        .select("id,file_name,month,rows_saved,status,created_at,snapshot_date,batch_kind")
-        .eq("status", "saved")
-        .order("created_at", { ascending: false })
-        .range(0, 199);
-      if (error) throw error;
-      return sortBatchesForAnalysis((data || []) as UploadBatch[]);
-    },
-  });
-  const batches = batchesQuery.data || [];
-  const latestBatch = batches[0] || null;
-
-  const movementsQuery = useQuery({
-    queryKey: ["inventory_movements_dashboard", latestBatch?.id],
-    enabled: !!latestBatch?.id,
-    staleTime: 0, refetchOnMount: "always", refetchOnWindowFocus: true,
-    queryFn: () => fetchMovementsByBatch(latestBatch!.id) as Promise<Movement[]>,
-  });
-  const movements = movementsQuery.data || [];
-
-  const error = batchesQuery.error || movementsQuery.error;
-  const loading = batchesQuery.isLoading || (!!latestBatch?.id && movementsQuery.isLoading);
-
-  type Row = {
-    key: string; itemKey: string; itemName: string; tradeNames: string[]; itemCode: string | null;
-    locationName: string; locationType: string;
-    balance: number; issued: number; adc: number; days: number | null;
-    kind: "critical" | "danger" | "below" | "over" | "very_over" | "deadstock" | "ok";
-  };
-
-  const rows: Row[] = useMemo(() => {
-    if (!movements.length) return [];
-    const agg = new Map<string, Row>();
-    for (const m of movements) {
-      const ik = itemKey(m);
-      const lk = normalize(`${m.location_type}|${m.location_name}`);
-      const k = `${ik}::${lk}`;
-      const prev = agg.get(k);
-      const issued = num(m.issued_quantity);
-      const balance = num(m.current_balance);
-      if (prev) {
-        prev.issued += issued;
-        prev.balance += balance;
-        prev.tradeNames = Array.from(new Set([...prev.tradeNames, ...itemTradeNames(m as any)]));
-      }
-      else {
-        agg.set(k, {
-          key: k, itemKey: ik, itemName: itemDisplayName(m as any),
-          tradeNames: itemTradeNames(m as any),
-          itemCode: m.item_code, locationName: m.location_name, locationType: m.location_type,
-          balance, issued, adc: 0, days: null, kind: "ok",
-        });
-      }
-    }
-    const arr = Array.from(agg.values());
-    const branchAdcByItem = new Map<string, number>();
-    for (const r of arr) {
-      if (isMain(r.locationType)) continue;
-      branchAdcByItem.set(r.itemKey, (branchAdcByItem.get(r.itemKey) || 0) + r.issued / 30);
-    }
-    for (const r of arr) {
-      const rowIsMain = isMain(r.locationType);
-      r.adc = rowIsMain ? (branchAdcByItem.get(r.itemKey) || 0) : r.issued / 30;
-      r.days = r.adc > 0 ? r.balance / r.adc : null;
-      if (rowIsMain && r.balance <= 0 && r.adc > 0) r.kind = "critical";
-      else if (rowIsMain && r.adc <= 0) r.kind = "ok";
-      else if (!rowIsMain && r.issued === 0 && r.balance > 0) r.kind = "deadstock";
-      else if (r.days == null) r.kind = "ok";
-      else if (r.days < 7) r.kind = "critical";
-      else if (r.days < 14) r.kind = "danger";
-      else if (r.days < target) r.kind = "below";
-      else if (r.days > 3 * target) r.kind = "very_over";
-      else if (r.days > 2 * target) r.kind = "over";
-      else r.kind = "ok";
-    }
-    return arr;
-  }, [movements]);
+  const latestBatch = projected?.latestBatch || null;
+  const batches = projected?.batches || [];
+  const loading = continuousQ.isLoading;
+  const error = continuousQ.error;
+  const rows = (projected?.rows || []).map((row) => ({ ...row, kind: row.kind === "safe" ? "ok" : row.kind }));
+  const movements = rows;
 
   const branchRows = rows.filter((r) => !isMain(r.locationType));
   const mainRows = rows.filter((r) => isMain(r.locationType));
 
-  const itemsSet = new Set(movements.map((m) => itemKey(m)));
+  const itemsSet = new Set(rows.map((m) => m.itemKey));
   const pharmaciesSet = new Set(
-    movements.filter((m) => !isMain(m.location_type)).map((m) => normalize(m.location_name))
+    rows.filter((m) => !isMain(m.locationType)).map((m) => normalize(m.locationName))
   );
 
   const shortageRows = branchRows.filter((r) => r.kind === "critical" || r.kind === "danger" || r.kind === "below");
@@ -261,8 +186,8 @@ export default function Dashboard() {
           </div>
 
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-8">
-            <StatCard label="إجمالي رصيد الصيدليات الفرعية" value={fmtNum(totalBranchStock, 0)} icon={Building2} tone="info" />
-            <StatCard label="إجمالي رصيد المخزن الرئيسي" value={fmtNum(totalMainStock, 0)} icon={Warehouse} tone="success" />
+            <StatCard label="سجلات الأصناف في الفروع" value={fmtNum(branchRows.length, 0)} icon={Building2} tone="info" />
+            <StatCard label="سجلات الأصناف في المخزن" value={fmtNum(mainRows.length, 0)} icon={Warehouse} tone="success" />
           </div>
 
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">

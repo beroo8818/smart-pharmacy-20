@@ -193,7 +193,7 @@ export default function WhatToDo() {
           <div className="grid grid-cols-2 md:grid-cols-3 gap-3 text-sm">
             <div><div className="text-xs text-muted-foreground">مصدر البيانات</div><div className="font-semibold truncate" dir="auto" title={batch.file_name}>{batch.file_name}</div></div>
             <div><div className="text-xs text-muted-foreground">الشهر</div><div className="font-semibold">{fmtMonth(batch.month)}</div></div>
-            <div><div className="text-xs text-muted-foreground">الصفوف المحفوظة</div><div className="font-semibold">{fmtNum(batch.rows_saved)}</div></div>
+            <div><div className="text-xs text-muted-foreground">الصفوف المحفوظة</div><div className="font-semibold">{fmtNum(batch.row_count)}</div></div>
           </div>
         </Card>
       )}

@@ -1,3 +1,4 @@
+import { loadContinuousAnalysis } from "@/lib/continuousAnalysis";
 import { useParams, Link } from "react-router-dom";
 import PageHeader from "@/components/PageHeader";
 import DataSourceCard from "@/components/DataSourceCard";
@@ -17,17 +18,11 @@ export default function ItemDetail() {
   const { id } = useParams(); // id is the itemKey
   const [target, setTarget] = useState(30);
 
-  const batchQ = useQuery({ queryKey: ["latest-batch-item"], queryFn: fetchLatestBatch });
-  const batch = batchQ.data || null;
-  const movQ = useQuery({
-    queryKey: ["movements-item", batch?.id],
-    enabled: !!batch?.id,
-    queryFn: () => fetchMovementsByBatch(batch!.id),
-  });
-  const movements = movQ.data || [];
-  const loading = batchQ.isLoading || movQ.isLoading;
-
-  const rows = useMemo(() => analyzeMovements(movements, target), [movements, target]);
+  const datasetQ = useQuery({ queryKey: ["item-current-history", target], queryFn: () => loadContinuousAnalysis({ targetDays: target }) });
+  const batch = datasetQ.data?.latestBatch || null;
+  const movements = datasetQ.data?.rows || [];
+  const loading = datasetQ.isLoading;
+  const rows = datasetQ.data?.rows || [];
   const itemRows = useMemo(() => rows.filter((r) => r.itemKey === decodeURIComponent(id || "")), [rows, id]);
 
   const header = itemRows[0];
@@ -63,13 +58,14 @@ export default function ItemDetail() {
   const mainBalance = mainRows.reduce((s, r) => s + r.balance, 0);
   const branchBalance = branchRows.reduce((s, r) => s + r.balance, 0);
   const hospitalBalance = mainBalance + branchBalance;
-  const totalIssued = itemRows.reduce((s, r) => s + r.issued, 0);
-  const hospitalAdc = totalIssued / 30;
+  const totalIssued = branchRows.reduce((s, r) => s + r.issued, 0);
+  const hospitalAdc = branchRows.reduce((sum, row) => sum + row.adc, 0);
   const branchesAdc = branchRows.reduce((s, r) => s + r.adc, 0);
-  const hospitalDays = hospitalAdc > 0 ? hospitalBalance / hospitalAdc : null;
+  const hospitalDays = itemRows.every((row) => row.hasBalance) && new Set(itemRows.map((row) => row.snapshotDate)).size <= 1 && hospitalAdc > 0 ? hospitalBalance / hospitalAdc : null;
   const mainReserve = Math.ceil(branchesAdc * target);
   const mainAvailable = Math.max(0, mainBalance - mainReserve);
 
+  const incomplete = itemRows.some((row) => row.kind === "no_data") || new Set(itemRows.map((row) => row.snapshotDate)).size > 1;
   const shortages = branchRows
     .filter((r) => r.kind === "critical" || r.kind === "danger" || r.kind === "below")
     .map((r) => ({ ...r, need: Math.max(0, Math.ceil(r.adc * target - r.balance)) }))
@@ -113,6 +109,8 @@ export default function ItemDetail() {
       reason: `لا توجد صيدلية ناقصة، ويوجد فائض ${fmtNum(totalSurplus)} وحدة. تجنّب الطلب حاليًا.`,
     };
   }
+
+  if (incomplete) decision = { kind: "watch", text: "راجع البيانات أولًا", reason: "بيانات غير مكتملة أو أرصدة بتواريخ مختلفة؛ لا يعتمد شراء أو تحويل تلقائيًا." };
 
   const DECISION_STYLE: Record<typeof decision.kind, { cls: string; Icon: any }> = {
     dispense: { cls: "bg-emerald-500/15 text-emerald-700 dark:text-emerald-300 border-emerald-500/40", Icon: Package },
@@ -215,7 +213,7 @@ export default function ItemDetail() {
                   <tr>
                     <th className="text-right p-2 min-w-[200px]">الصيدلية</th>
                     <th className="text-right p-2">الرصيد</th>
-                    <th className="text-right p-2">المنصرف</th>
+                    <th className="text-right p-2">متوسط منصرف (30 يومًا)</th>
                     <th className="text-right p-2">متوسط يومي</th>
                     <th className="text-right p-2">يكفي (يوم)</th>
                     <th className="text-right p-2">الحالة</th>
@@ -363,7 +361,7 @@ export default function ItemDetail() {
           <Card className="p-5 mb-4">
             <div className="font-bold mb-3">لماذا؟ شرح الحسابات</div>
             <ul className="space-y-2 text-sm leading-7 list-disc pr-5">
-              <li>إجمالي المنصرف الشهري <b>{fmtNum(totalIssued)}</b> ÷ 30 = متوسط صرف يومي <b>{fmtNum(hospitalAdc, 1)}</b> وحدة/يوم.</li>
+              <li>متوسط منصرف الفروع المعياري (30 يومًا) <b>{fmtNum(totalIssued)}</b> ÷ 30 = متوسط صرف يومي <b>{fmtNum(hospitalAdc, 1)}</b> وحدة/يوم. منصرف شهر بعينه متاح في صفحة «منصرف المستشفى».</li>
               <li>إجمالي رصيد المستشفى <b>{fmtNum(hospitalBalance)}</b> (مخزن {fmtNum(mainBalance)} + صيدليات {fmtNum(branchBalance)}) ÷ المتوسط اليومي = <b>{hospitalDays == null ? "—" : fmtNum(hospitalDays)}</b> يوم تغطية.</li>
               <li>إجمالي متوسط صرف الصيدليات الفرعية <b>{fmtNum(branchesAdc, 1)}</b> × هدف التغطية <b>{target}</b> يوم = رصيد الأمان المطلوب للمخزن <b>{fmtNum(mainReserve)}</b>.</li>
               <li>المتاح للصرف من المخزن = رصيد المخزن <b>{fmtNum(mainBalance)}</b> − رصيد الأمان <b>{fmtNum(mainReserve)}</b> = <b>{fmtNum(mainAvailable)}</b>.</li>

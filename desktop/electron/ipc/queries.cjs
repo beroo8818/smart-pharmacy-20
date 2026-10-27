@@ -47,7 +47,7 @@ function getMovementsByBatch({ token: tk, batchId }) {
 function listBatchesContinuous({ token: tk, limit }) {
   requireAuth(tk);
   const db = getDb();
-  const lim = Math.min(Number(limit) || 12, 60);
+  const lim = Math.min(Number(limit) || 10000, 10000);
   const rows = db
     .prepare(
       `SELECT id, file_name, month, status, row_count, uploaded_by, uploaded_at, notes,

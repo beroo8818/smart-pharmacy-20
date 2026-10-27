@@ -1,3 +1,4 @@
+import { locationKey, monthDays, numericValue } from "../../shared/inventoryHistory";
 import { supabase } from "@/integrations/supabase/client";
 import {
   buildStandardName,
@@ -96,7 +97,7 @@ type ItemKeyParts = {
 };
 
 export function itemKeyFromParts(parts: ItemKeyParts) {
-  if (parts.therapeutic_group_key) return `ai::${normalize(parts.therapeutic_group_key)}`;
+  if (parts.therapeutic_group_key) return `ai::${normalize(parts.therapeutic_group_key)}|${normalize(parts.unit)}`;
   const active = extractActiveIngredient(parts.scientific_name, parts.item_name, parts.trade_name);
   const strength = parts.strength || extractStrength(parts.scientific_name, parts.item_name, parts.trade_name);
   const dosage = parts.dosage_form || extractDosageForm(parts.scientific_name, parts.item_name, parts.trade_name, parts.unit);
@@ -217,17 +218,23 @@ export function sortBatchesForAnalysis<T extends Pick<UploadBatch, "month" | "cr
 }
 
 export function analyzeMovements(movements: Movement[], targetDays = 30): AnalysisRow[] {
-  const groups = new Map<string, { sample: Movement; balance: number; issued: number; tradeNames: Set<string> }>();
+  const groups = new Map<string, { sample: Movement; balance: number; issued: number; adc: number; hasBalance: boolean; hasIssued: boolean; tradeNames: Set<string> }>();
   for (const m of movements) {
-    const key = `${itemKey(m)}|${normalize(m.location_type)}|${normalize(m.location_name)}`;
+    const key = `${itemKey(m)}|${locationKey(m.location_name, m.location_type)}`;
     const cur = groups.get(key);
     const issued = num(m.issued_quantity);
     const balance = num(m.current_balance);
+    const hasBalance = numericValue(m.current_balance) != null;
+    const hasIssued = numericValue(m.issued_quantity) != null;
+    const daily = issued / (monthDays(m.month) || 30);
     const names = itemTradeNames(m);
-    if (!cur) groups.set(key, { sample: m, balance, issued, tradeNames: new Set(names) });
+    if (!cur) groups.set(key, { sample: m, balance, issued, adc: daily, hasBalance, hasIssued, tradeNames: new Set(names) });
     else {
-      cur.balance = balance;
+      cur.balance += balance;
       cur.issued += issued;
+      cur.adc += daily;
+      cur.hasBalance &&= hasBalance;
+      cur.hasIssued &&= hasIssued;
       names.forEach((n) => cur.tradeNames.add(n));
     }
   }
@@ -235,15 +242,15 @@ export function analyzeMovements(movements: Movement[], targetDays = 30): Analys
   for (const g of groups.values()) {
     if (isMainLocation(g.sample.location_type)) continue;
     const k = itemKey(g.sample);
-    branchAdcByItem.set(k, (branchAdcByItem.get(k) || 0) + g.issued / 30);
+    branchAdcByItem.set(k, (branchAdcByItem.get(k) || 0) + g.adc);
   }
   return Array.from(groups.values()).map((g) => {
     const itemK = itemKey(g.sample);
     const isMain = isMainLocation(g.sample.location_type);
     const branchAdc = branchAdcByItem.get(itemK) || 0;
-    const adc = isMain ? branchAdc : g.issued / 30;
+    const adc = isMain ? branchAdc : g.adc;
     const days = adc > 0 ? g.balance / adc : null;
-    const kind = isMain ? classifyMain(days, g.balance, branchAdc, targetDays) : classifyBranch(days, g.balance, g.issued, targetDays);
+    const kind = !g.hasBalance || (!isMain && !g.hasIssued) ? "no_data" : isMain ? classifyMain(days, g.balance, branchAdc, targetDays) : classifyBranch(days, g.balance, g.issued, targetDays);
     let why = "الرصيد ضمن حدود التغطية المطلوبة.";
     let action = "لا يوجد إجراء عاجل.";
     if (isMain && g.balance <= 0 && branchAdc > 0) {

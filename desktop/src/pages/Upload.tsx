@@ -1,3 +1,4 @@
+import { previousMonth, numericValue, todayISO, validISODate } from "../../../shared/inventoryHistory";
 import { useMemo, useState, useEffect } from "react";
 import * as XLSX from "xlsx";
 import PageHeader from "@/components/PageHeader";
@@ -33,8 +34,7 @@ function normalize(s: any) {
 function toNum(v: any): number | null {
   const s = String(v ?? "").trim();
   if (!s || s === "-" || s === "—" || s.startsWith("#")) return null;
-  const n = Number(s.replace(/[,\s]/g, ""));
-  return isNaN(n) ? null : n;
+  return numericValue(s);
 }
 
 function toISODate(v: any): string | null {
@@ -99,7 +99,7 @@ function extractMonthFromFilename(name: string): string | null {
 
 type BatchKind = "monthly" | "weekly_update" | "full_snapshot" | "partial_update" | "period_consumption";
 
-function extractSnapshotDateFromWorkbook(wb: XLSX.WorkBook): string | null {
+export function extractSnapshotDateFromWorkbook(wb: XLSX.WorkBook): string | null {
   for (const sheetName of wb.SheetNames.filter((name) => !isDuplicateSheetName(name))) {
     const ws = wb.Sheets[sheetName];
     const arr: any[][] = XLSX.utils.sheet_to_json(ws, { header: 1, defval: null, raw: false });
@@ -128,25 +128,25 @@ function genItemCode(name?: string | null, strength?: string | null, form?: stri
   return parts.join("_").slice(0, 60) || null;
 }
 
-function canonicalLocationName(name?: string | null): string {
-  const raw = (name || "").trim();
-  const n = normalize(raw);
+export function canonicalLocationName(name?: string | null): string {
+  const raw = (name || "").replace(/[()]/g, " ").replace(/\s+/g, " ").trim();
+  const n = normalize(raw).replace(/[٠-٩]/g, (digit) => String("٠١٢٣٤٥٦٧٨٩".indexOf(digit)));
   if (!n) return "غير محدد";
-  if (n.includes("مخزن") || n.includes("رئيس")) return "المخزن الرئيسي";
-  if (n.includes("بيولوجي")) return "صيدلية البيولوجي";
-  if (n.includes("عيادات") || (n.includes("خارجي") && !n.includes("اورام"))) return "صيدلية العيادات الخارجية";
-  if (n.includes("اورام") && (n.includes("(ا)") || n.includes(" ا") || n.endsWith("ا"))) return "صيدلية خارجي أورام (أ)";
-  if (n.includes("اورام") && (n.includes("(ب)") || n.includes(" ب") || n.endsWith("ب"))) return "صيدلية خارجي أورام (ب)";
-  if (n.includes("عمليات")) return "صيدلية العمليات";
-  if (n.includes("تصلب") || n.includes("ms")) return "صيدلية التصلب العضلي (MS)";
-  if (n.includes("داخلي") && (n.includes("a") || n.includes(" ا"))) return "صيدلية الداخلي A";
-  if (n.includes("داخلي") && (n.includes("b") || n.includes(" ب"))) return "صيدلية الداخلي B";
-  if (n.includes("السادس")) return "صيدلية السادس";
-  if (n.includes("رعايه") && n.includes("2")) return "صيدلية الرعاية 2";
-  if (n.includes("رعايه")) return "صيدلية الرعاية 1";
-  if (n.includes("قلب")) return "صيدلية القلب";
-  if (n.includes("زيرو")) return "صيدلية الزيرو";
-  return raw;
+  if (/^(المخزن الرئيسي|مخزن رئيسي|main warehouse|main store)$/.test(n)) return "المخزن الرئيسي";
+  const short = n.replace(/^صيدليه\s+/, "");
+  if (/^(خارجي عيادات|العيادات الخارجيه|عيادات|العيادات)$/.test(short)) return "صيدلية العيادات الخارجية";
+  const cancer = short.match(/^خارجي اورام\s*([اب])$/);
+  if (cancer) return cancer[1] === "ا" ? "صيدلية خارجي أورام (أ)" : "صيدلية خارجي أورام (ب)";
+  const internal = short.match(/^الداخلي\s*([abاب])$/);
+  if (internal) return ["a", "ا"].includes(internal[1]) ? "صيدلية الداخلي A" : "صيدلية الداخلي B";
+  const care = short.match(/^الرعايه\s*(\d+)$/);
+  if (care) return `صيدلية الرعاية ${care[1]}`;
+  const known: Record<string, string> = {
+    "البيولوجي": "صيدلية البيولوجي", "العمليات": "صيدلية العمليات", "السادس": "صيدلية السادس",
+    "القلب": "صيدلية القلب", "الزيرو": "صيدلية الزيرو",
+    "التصلب العضلي ms": "صيدلية التصلب العضلي (MS)",
+  };
+  return known[short] || raw;
 }
 
 function isDuplicateSheetName(name: string): boolean {
@@ -189,7 +189,7 @@ function findHeaderRow(aoa: any[][]): number {
 interface PharmacyCol { name: string; type: "sub_pharmacy" | "main_store"; issuedCol: number; balanceCol: number; }
 interface MetaCols { itemName?: number; scientific?: number; trade?: number; unit?: number; strength?: number; form?: number; code?: number; }
 
-function detectStructure(aoa: any[][]): {
+export function detectStructure(aoa: any[][]): {
   headerRow: number; secondHeaderRow: number | null;
   meta: MetaCols; pharmacies: PharmacyCol[]; mainStoreCandidates: { col: number; label: string }[];
 } {
@@ -217,17 +217,17 @@ function detectStructure(aoa: any[][]): {
     for (const hr of headerRows) {
       const cell = (hr[c] || "").trim();
       if (!cell) continue;
-      if (!meta.code && (cell.includes("كود") || cell === "code" || cell === "sku")) meta.code = c;
-      if (!meta.itemName && (cell.includes("اسم كما") || cell.includes("الاسم كما") || cell.includes("اسم الصنف") || cell.includes("اسم الدواء") || cell.includes("المنظومه") || cell.includes("المنظومة"))) meta.itemName = c;
-      if (!meta.scientific && (cell.includes("علمي") || cell.includes("scientific") || cell.includes("generic"))) meta.scientific = c;
-      if (!meta.trade && (cell.includes("تجاري") || cell.includes("trade") || cell.includes("brand"))) meta.trade = c;
-      if (!meta.unit && (cell === "الوحده" || cell.includes("الوحده") || cell === "unit" || cell === "uom")) meta.unit = c;
-      if (!meta.strength && (cell.includes("تركيز") || cell.includes("جرعه") || cell === "strength")) meta.strength = c;
-      if (!meta.form && (cell.includes("الشكل") || cell === "form" || cell.includes("dosage"))) meta.form = c;
+      if (meta.code == null && (cell.includes("كود") || cell === "code" || cell === "sku")) meta.code = c;
+      if (meta.itemName == null && (cell.includes("اسم كما") || cell.includes("الاسم كما") || cell.includes("اسم الصنف") || cell.includes("اسم الدواء") || cell.includes("المنظومه") || cell.includes("المنظومة"))) meta.itemName = c;
+      if (meta.scientific == null && (cell.includes("علمي") || cell.includes("scientific") || cell.includes("generic"))) meta.scientific = c;
+      if (meta.trade == null && (cell.includes("تجاري") || cell.includes("trade") || cell.includes("brand"))) meta.trade = c;
+      if (meta.unit == null && (cell === "الوحده" || cell.includes("الوحده") || cell === "unit" || cell === "uom")) meta.unit = c;
+      if (meta.strength == null && (cell.includes("تركيز") || cell.includes("جرعه") || cell === "strength")) meta.strength = c;
+      if (meta.form == null && (cell.includes("الشكل") || cell === "form" || cell.includes("dosage"))) meta.form = c;
     }
   }
   // Fallback for item name: any header cell with "اسم" but not علمي/تجاري.
-  if (!meta.itemName) {
+  if (meta.itemName == null) {
     outer: for (let c = 0; c < maxCols; c++) {
       for (const hr of headerRows) {
         const cell = (hr[c] || "").trim();
@@ -283,7 +283,7 @@ function detectStructure(aoa: any[][]): {
   for (let c = 0; c < maxCols; c++) {
     for (const hr of headerRows) {
       const cell = (hr[c] || "").trim();
-      if (/^رصيد\s*(شهر|الشهر|نوفمبر|اكتوبر|ديسمبر|سبتمبر|اغسطس|يوليو|يونيو|مايو|ابريل|مارس|فبراير|يناير|\d{4})/.test(cell)) {
+      if (/^رصيد\s*(شهر|الشهر|نوفمبر|اكتوبر|ديسمبر|سبتمبر|اغسطس|يوليو|يونيو|مايو|ابريل|مارس|فبراير|يناير|\d{1,2}[\/\-]\d{1,2}[\/\-]\d{4}|\d{4})/.test(cell)) {
         if (!pharmacies.some((p) => p.balanceCol === c) && !mainStoreCandidates.some((m) => m.col === c)) {
           mainStoreCandidates.push({ col: c, label: cell });
         }
@@ -330,7 +330,7 @@ export interface SuggestionEntry {
   reason: string;       // explanation
 }
 
-function buildLongRows(
+export function buildLongRows(
   aoa: any[][], sheetName: string, struct: ReturnType<typeof detectStructure>,
   month: string | null, mainStoreColIdx: number | null,
   acceptedSuggestions: Set<string> = new Set(),
@@ -465,6 +465,7 @@ function buildLongRows(
       reviewReasons.push("تم استكمال بياناته من الصف السابق — يحتاج مراجعة");
     }
 
+    if (!useUnit) reviewReasons.push("الوحدة غير محددة؛ يلزم تأكيدها قبل التجميع");
     const isReview = reviewReasons.length > 0;
     if (isReview) {
       review.push({
@@ -477,7 +478,7 @@ function buildLongRows(
 
     const scientific = useScientific || null;
     const trade = useTrade || null;
-    const code = useCode || genItemCode(effectiveName, useStrength, useForm);
+    const code = useCode || genItemCode([effectiveName, useTrade, useUnit].filter(Boolean).join(" "), useStrength, useForm);
 
     const base: Partial<CanonRow> = {
       _sheet: sheetName,
@@ -545,24 +546,27 @@ function buildLongRows(
 }
 
 /* Aggregate duplicates (same month + item + location + type) */
-function aggregateDuplicates(rows: CanonRow[]): { rows: CanonRow[]; merged: number; duplicates: IgnoredRow[] } {
+export function aggregateDuplicates(rows: CanonRow[]): { rows: CanonRow[]; merged: number; duplicates: IgnoredRow[] } {
   const map = new Map<string, CanonRow>();
   const duplicates: IgnoredRow[] = [];
   let merged = 0;
   for (const r of rows) {
-    const key = `${r.month}|${normalize(r.item_code || r.item_name_ar)}|${normalize(r.location)}|${r.location_type}`;
+    const key = [r.month, r.item_code || r.item_name_ar, r.item_name_en, r.active_ingredient,
+      r.strength, r.dosage_form, r.unit, r.location, r.location_type].map(normalize).join("|");
     const existing = map.get(key);
     if (!existing) { map.set(key, { ...r, _dup_count: 1 }); continue; }
     merged++;
     existing._dup_count = (existing._dup_count || 1) + 1;
-    duplicates.push({ row: r._row, sheet: r._sheet, reason: "صف مكرر (نفس الصنف والصيدلية والشهر) — تم الدمج", preview: `${r.item_name_ar || ""} · ${r.location || ""}` });
-    existing.issued = (existing.issued || 0) + (r.issued || 0);
-    existing.received = (existing.received || 0) + (r.received || 0);
-    existing.opening = (existing.opening || 0) + (r.opening || 0);
-    existing.transfer_in = (existing.transfer_in || 0) + (r.transfer_in || 0);
-    existing.transfer_out = (existing.transfer_out || 0) + (r.transfer_out || 0);
-    existing.returns = (existing.returns || 0) + (r.returns || 0);
-    existing.closing = (existing.closing || 0) + (r.closing || 0);
+    const fields = ["issued", "closing", "received", "opening", "transfer_in", "transfer_out", "returns"] as const;
+    const identical = fields.every((field) => existing[field] === r[field]);
+    if (!identical || r._status === "review") {
+      existing._status = "review";
+      existing._review_reasons = Array.from(new Set([...(existing._review_reasons || []),
+        ...(r._review_reasons || []), "صفوف مكررة متعارضة؛ راجع الكميات، لم يتم جمع الأرصدة تلقائيًا"]));
+    }
+    duplicates.push({ row: r._row, sheet: r._sheet,
+      reason: identical ? "نسخة مكررة مطابقة؛ احتُسبت مرة واحدة" : "تكرار متعارض يحتاج مراجعة؛ لم تجمع الكميات",
+      preview: `${r.item_name_ar || ""} · ${r.location || ""} · رصيد ${r.closing ?? "غير مسجل"} · منصرف ${r.issued ?? "غير مسجل"}` });
   }
   return { rows: Array.from(map.values()), merged, duplicates };
 }
@@ -668,6 +672,9 @@ export default function UploadPage() {
   }
 
   const struct = useMemo(() => (aoa.length ? detectStructure(aoa) : null), [aoa]);
+  useEffect(() => {
+    setMainStoreCol(struct?.mainStoreCandidates.length === 1 ? struct.mainStoreCandidates[0].col : null);
+  }, [struct]);
   const importSheetNames = useMemo(() => sheetNames.filter((name) => !isDuplicateSheetName(name)), [sheetNames]);
 
   // Suggest month from filename when file loads
@@ -680,11 +687,10 @@ export default function UploadPage() {
   }, [filename]);
 
   const effectiveMonth = manualMonth ? `${manualMonth}-01` : null;
-  const effectiveSnapshot = snapshotDate || (manualMonth ? lastDayOfMonth(manualMonth) : null);
+  const effectiveSnapshot = snapshotDate || null;
 
   function setManualMonthAndSnapshot(value: string) {
     setManualMonth(value);
-    setSnapshotDate(value ? lastDayOfMonth(value) : "");
   }
 
   // Per-sheet processing for "all sheets" mode
@@ -852,6 +858,8 @@ export default function UploadPage() {
     const f = e.target.files?.[0];
     if (!f) return;
     setFile(f); setFilename(f.name); setManualMonth(""); setSavedBatch(null);
+    setAcceptedSuggestions(new Set()); setRowDecisions(new Map()); setRowEdits(new Map());
+    setCurrentStep(1);
     const buf = await f.arrayBuffer();
     const wb = XLSX.read(buf, { type: "array", cellDates: true });
     const detectedSnapshot = extractSnapshotDateFromWorkbook(wb);
@@ -859,8 +867,8 @@ export default function UploadPage() {
     if (detectedSnapshot) setSnapshotDate(detectedSnapshot);
     else if (monthFromName) setSnapshotDate(lastDayOfMonth(monthFromName.substring(0, 7)));
     else setSnapshotDate("");
-    if (monthFromName) setManualMonth(monthFromName.substring(0, 7));
-    else if (detectedSnapshot) setManualMonth(detectedSnapshot.substring(0, 7));
+    if (detectedSnapshot) setManualMonth(previousMonth(detectedSnapshot));
+    else if (monthFromName) setManualMonth(monthFromName.substring(0, 7));
     setWorkbook(wb);
     setSheetNames(wb.SheetNames);
     loadSheet(wb, wb.SheetNames.find((name) => !isDuplicateSheetName(name)) || wb.SheetNames[0]);
@@ -872,10 +880,14 @@ export default function UploadPage() {
     const sep = txt.includes("\t") ? "\t" : ",";
     const wb = XLSX.read(txt, { type: "string", FS: sep });
     const detectedSnapshot = extractSnapshotDateFromWorkbook(wb);
+    setSnapshotDate(detectedSnapshot || "");
+    setManualMonth(detectedSnapshot ? previousMonth(detectedSnapshot) : "");
     if (detectedSnapshot) {
       setSnapshotDate(detectedSnapshot);
-      if (!manualMonth) setManualMonth(detectedSnapshot.substring(0, 7));
+      setManualMonth(previousMonth(detectedSnapshot));
     }
+    setAcceptedSuggestions(new Set()); setRowDecisions(new Map()); setRowEdits(new Map());
+    setCurrentStep(1);
     setWorkbook(wb);
     setSheetNames(wb.SheetNames);
     setFilename("paste.csv");
@@ -895,6 +907,10 @@ export default function UploadPage() {
     if (high > 0) { toast.error(`أصلح ${high} مشكلة حرجة قبل الحفظ`); return; }
     if (!effectiveMonth) { toast.error("اختر الشهر قبل الحفظ"); return; }
     if (!effectiveSnapshot) { toast.error("اختر تاريخ الرصيد قبل الحفظ"); return; }
+    if (!validISODate(effectiveSnapshot) || effectiveSnapshot > todayISO()) { toast.error("لا يمكن حفظ رصيد بتاريخ مستقبلي"); return; }
+    if (analysisMode === "all" && workbook && importSheetNames.some((name) => detectStructure(XLSX.utils.sheet_to_json(workbook.Sheets[name], { header: 1, defval: null, raw: false }) as any[][]).mainStoreCandidates.length > 1)) {
+      toast.error("يوجد أكثر من عمود محتمل للمخزن؛ اختر تحليل ورقة واحدة وحدد العمود قبل الحفظ"); return;
+    }
     setBusy(true);
     try {
       const fileName = filename || "paste.csv";
@@ -911,8 +927,8 @@ export default function UploadPage() {
           location: isMain ? "المخزن الرئيسي" : canonicalLocationName(r.location || "غير محدد"),
           location_type: (isMain ? "main_store" : "sub_pharmacy") as "main_store" | "sub_pharmacy",
           month: (r.month || effectiveMonth) as string,
-          issued_qty: r.issued || 0,
-          closing_balance: r.closing || 0,
+          issued_qty: batchKind === "monthly" || batchKind === "period_consumption" ? r.issued ?? null : null,
+          closing_balance: batchKind === "period_consumption" ? null : r.closing ?? null,
         };
       });
       const res = await api.upload.saveBatch({
@@ -1107,7 +1123,8 @@ export default function UploadPage() {
           {/* Month picker */}
           {currentStep === 1 && (
           <Card className="p-5 mb-4">
-            <div className="font-bold mb-2">الشهر الخاص بالبيانات</div>
+            <div className="font-bold mb-2">شهر المنصرف (مستقل عن تاريخ الرصيد)</div>
+            <p className="text-xs text-muted-foreground mb-3">الاقتراح الافتراضي هو الشهر السابق لتاريخ الرصيد. راجعه وعدله إذا كان الملف يخص فترة مختلفة.</p>
             <div className="flex items-center gap-3 flex-wrap text-sm">
               <Input type="month" value={manualMonth} onChange={(e) => setManualMonthAndSnapshot(e.target.value)} className="max-w-[180px]" />
               {filenameMonth && (
@@ -1143,7 +1160,7 @@ export default function UploadPage() {
                 </select>
               </label>
               <span className="text-xs text-muted-foreground">
-                لو فاضي → آخر يوم في الشهر. التحديث الأسبوعي يصبح نقطة بداية جديدة للتوقع.
+                تاريخ الرصيد إلزامي ومستقل. تحديث الرصيد لا يضيف شهر استهلاك جديدًا. المنصرف لفترة فقط لا يغيّر الرصيد.
               </span>
             </div>
           </Card>

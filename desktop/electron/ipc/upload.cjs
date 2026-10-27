@@ -30,14 +30,21 @@ function getOrCreateLocation(db, name, type) {
 function getOrCreateItem(db, row) {
   const code = clean(row.item_code);
   if (code) {
-    const byCode = db.prepare("SELECT id FROM item_master WHERE item_code = ?").get(code);
-    if (byCode) return byCode.id;
+    const byCode = db.prepare("SELECT id, unit, strength, dosage_form, item_name_en, item_name_ar, active_ingredient_ar FROM item_master WHERE item_code = ?").get(code);
+    if (byCode) {
+      for (const field of ["unit", "strength", "dosage_form", "item_name_en", "item_name_ar", "active_ingredient_ar"]) {
+        if (clean(row[field]) && clean(byCode[field]) && clean(row[field]) !== clean(byCode[field])) {
+          throw new Error("كود الصنف مستخدم ببيانات مختلفة؛ راجع الوحدة والتركيز والاسم التجاري: " + code);
+        }
+      }
+      return byCode.id;
+    }
   }
   const name = clean(row.item_name_ar) || clean(row.item_name_en) || code || "صنف بدون اسم";
   const byName = db.prepare(
-    "SELECT id FROM item_master WHERE IFNULL(item_name_ar,'') = ? AND IFNULL(strength,'') = ? AND IFNULL(dosage_form,'') = ? LIMIT 1"
-  ).get(name, clean(row.strength) || "", clean(row.dosage_form) || "");
-  if (byName) return byName.id;
+    "SELECT id FROM item_master WHERE IFNULL(item_name_ar,'') = ? AND IFNULL(strength,'') = ? AND IFNULL(dosage_form,'') = ? AND IFNULL(unit,'') = ? AND IFNULL(item_name_en,'') = ? LIMIT 1"
+  ).get(name, clean(row.strength) || "", clean(row.dosage_form) || "", clean(row.unit) || "", clean(row.item_name_en) || "");
+  if (!code && byName) return byName.id;
   const id = uid();
   db.prepare(
     `INSERT INTO item_master(id, item_code, item_name_ar, item_name_en, active_ingredient_ar, strength, dosage_form, unit)
@@ -63,6 +70,17 @@ function saveBatch({ token, fileName, month, rows, ignored, snapshotDate, batchK
   }
   if (!month || !Array.isArray(rows) || rows.length === 0) {
     return { ok: false, error: "لا توجد بيانات صالحة للحفظ" };
+  }
+  const today = new Intl.DateTimeFormat("en-CA", { timeZone: "Africa/Cairo", year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date());
+  if (!snapshotDate || !/^\d{4}-\d{2}-\d{2}$/.test(snapshotDate) || !Number.isFinite(Date.parse(snapshotDate)) || snapshotDate > today) {
+    return { ok: false, error: "تاريخ الرصيد غير صالح أو في المستقبل" };
+  }
+  for (const row of rows) {
+    for (const field of ["issued_qty", "issued", "closing_balance", "closing"]) {
+      if (row[field] != null && (!Number.isFinite(Number(row[field])) || Number(row[field]) < 0)) {
+        return { ok: false, error: "كمية غير صالحة؛ راجع المنصرف والرصيد" };
+      }
+    }
   }
 
   const db = getDb();
@@ -95,13 +113,13 @@ function saveBatch({ token, fileName, month, rows, ignored, snapshotDate, batchK
         uid(), batchId, itemId, locationId, row.month || month,
         Number(row.opening_balance || row.opening || 0),
         Number(row.received_qty || row.received || 0),
-        Number(row.issued_qty || row.issued || 0),
-        Number(row.closing_balance || row.closing || 0),
+        row.issued_qty == null && row.issued == null ? null : Number(row.issued_qty ?? row.issued),
+        row.closing_balance == null && row.closing == null ? null : Number(row.closing_balance ?? row.closing),
         row.unit_price == null ? null : Number(row.unit_price),
         clean(row.expiry_date),
         row.min_stock == null ? null : Number(row.min_stock),
         row.max_stock == null ? null : Number(row.max_stock),
-        Number(row.lead_time_days || 30)
+        row.lead_time_days == null ? null : Number(row.lead_time_days)
       );
     }
     db.prepare("INSERT INTO audit_log(user_id, action, entity, entity_id, details) VALUES (?, ?, ?, ?, ?)")

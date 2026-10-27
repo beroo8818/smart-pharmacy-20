@@ -1,3 +1,4 @@
+import { buildInventoryHistory, locationKey, todayISO } from "../../shared/inventoryHistory";
 import PageHeader from "@/components/PageHeader";
 import { Card } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -10,6 +11,7 @@ import { Button } from "@/components/ui/button";
 import { ChevronDown, ChevronUp, AlertTriangle } from "lucide-react";
 import ItemIdentity from "@/components/ItemIdentity";
 import { itemDisplayName, itemKey as analysisItemKey, itemTradeNames, sortBatchesForAnalysis } from "@/lib/batchAnalysis";
+import { fetchMovementsForBatches, fetchRecentBatches } from "@/lib/continuousAnalysis";
 
 function DetailsBlock({ title, items, calc, why }: { title: string; items: [string, string][]; calc: string; why: string }) {
   return (
@@ -124,8 +126,8 @@ function bucketize(days: number | null, target: number, balance: number, adc: nu
   if (days < 7) return "critical";
   if (days < 14) return "danger";
   if (days < target) return "below";
-  if (days < target * 2) return "safe";
-  if (days < target * 3) return "over";
+  if (days <= target * 2) return "safe";
+  if (days <= target * 3) return "over";
   return "very_over";
 }
 
@@ -170,7 +172,7 @@ export default function Items() {
   const batchFromUrl = searchParams.get("batch");
   const [q, setQ] = useState("");
   const [target, setTarget] = useState<number>(30);
-  const [scope, setScope] = useState<string>("all_branches");
+  const [scope, setScope] = useState<string>(searchParams.get("scope") || "all_branches");
   const [dataMode, setDataMode] = useState<"latest" | "month" | "all">("latest");
   const [monthFilter, setMonthFilter] = useState("");
   const [viewMode, setViewMode] = useState<"simple" | "detailed">("simple");
@@ -249,14 +251,7 @@ export default function Items() {
     staleTime: 0,
     refetchOnMount: "always",
     queryFn: async () => {
-      const { data, error } = await db
-        .from<UploadBatch>("upload_batches")
-        .select("id,file_name,month,rows_saved,rows_ignored,status,created_at,created_by,snapshot_date,batch_kind")
-        .eq("status", "saved")
-        .order("created_at", { ascending: false })
-        .range(0, 199);
-      if (error) throw error;
-      return sortBatchesForAnalysis((data || []) as UploadBatch[]);
+      return await fetchRecentBatches() as UploadBatch[];
     },
   });
 
@@ -267,11 +262,12 @@ export default function Items() {
   const effectiveMonth = dataMode === "month" ? monthFilter || latestBatch?.month?.substring(0, 7) || "" : "";
 
   const movementsQuery = useQuery({
-    queryKey: ["inventory_movements", dataMode, selectedBatchId, effectiveMonth],
+    queryKey: ["inventory_movements", dataMode, selectedBatchId, effectiveMonth, batches.map((b) => b.id).join(",")],
     enabled: !batchesQuery.isLoading && (dataMode === "all" || dataMode === "month" || !!selectedBatchId),
     staleTime: 0,
     refetchOnMount: "always",
     queryFn: async () => {
+      if (dataMode === "latest" && !batchFromUrl) return await fetchMovementsForBatches(batches.map((b) => b.id)) as InventoryMovement[];
       let query = db
         .from<InventoryMovement>("inventory_movements")
         .select("id,upload_batch_id,month,item_name,item_code,scientific_name,trade_name,unit,location_name,location_type,issued_quantity,current_balance,source_sheet,source_row_number,created_at")
@@ -293,6 +289,7 @@ export default function Items() {
   const sourceText = useMemo(() => {
     if (!movements.length) return null;
     if (dataMode === "latest" && selectedBatch) {
+      if (!batchFromUrl) return "آخر رصيد مسجل لكل صنف وموقع، ومتوسط منصرف آخر 3 أشهر مكتملة. الأرصدة ليست جردًا موحدًا إذا اختلفت تواريخ التحديث.";
       return `مصدر التحليل: ملف ${selectedBatch.file_name}، شهر ${fmtMonth(selectedBatch.month)}، عدد الصفوف ${fmtNum(selectedBatch.rows_saved)}`;
     }
     if (dataMode === "month") {
@@ -305,7 +302,7 @@ export default function Items() {
   const locations = useMemo(() => {
     const map = new Map<string, { id: string; name: string; type: string }>();
     for (const m of movements) {
-      const key = normalize(`${m.location_type}|${m.location_name}`);
+      const key = locationKey(m.location_name, m.location_type);
       if (!map.has(key)) map.set(key, { id: key, name: m.location_name, type: m.location_type });
     }
     return Array.from(map.values()).sort((a, b) => a.name.localeCompare(b.name, "ar"));
@@ -325,32 +322,21 @@ export default function Items() {
   }, [mainStores]);
 
   const perItemLoc = useMemo(() => {
-    const grouped = new Map<string, InventoryMovement[]>();
-    for (const m of movements) {
-      const ik = itemKey(m);
-      if (!ik) continue;
-      const key = `${ik}|${normalize(m.location_type)}|${normalize(m.location_name)}`;
-      if (!grouped.has(key)) grouped.set(key, []);
-      grouped.get(key)!.push(m);
-    }
-
-    const out = new Map<string, { balance: number; amc: number; loc: { id: string; name: string; type: string }; sample: InventoryMovement }>();
-    for (const [key, rows] of grouped) {
-      const sorted = [...rows].sort((a, b) => `${a.month}${a.created_at}`.localeCompare(`${b.month}${b.created_at}`));
-      const byMonth = new Map<string, number>();
-      for (const r of sorted) byMonth.set(r.month, (byMonth.get(r.month) || 0) + num(r.issued_quantity));
-      const monthly = Array.from(byMonth.values());
-      const amc = monthly.length ? monthly.reduce((a, b) => a + b, 0) / monthly.length : 0;
-      const last = sorted[sorted.length - 1];
-      out.set(key, {
-        balance: num(last.current_balance),
-        amc,
-        loc: { id: normalize(`${last.location_type}|${last.location_name}`), name: last.location_name, type: last.location_type },
-        sample: last,
-      });
+    const history = buildInventoryHistory(batches, movements.map((m) => ({
+      sample: m, batchId: m.upload_batch_id, item: itemKey(m) || rawItemKey(m),
+      sku: [m.item_code, m.trade_name, m.item_name, m.unit].map(normalize).join("|"),
+      locationName: m.location_name, locationType: m.location_type,
+      balance: m.current_balance, issued: m.issued_quantity,
+    })), dataMode === "all" ? 1200 : 3, todayISO());
+    const out = new Map<string, { balance: number; amc: number; snapshot: string; valid: boolean; knownBalance: boolean; loc: { id: string; name: string; type: string }; sample: InventoryMovement }>();
+    for (const value of history) {
+      const key = `${itemKey(value.sample)}|${locationKey(value.locName, value.locType)}`;
+      out.set(key, { balance: value.latestBalance, amc: value.issuedAverage,
+        snapshot: value.latestSnapshot, knownBalance: value.hasBalance, valid: value.hasBalance && value.hasConsumption && !value.mixedSnapshots,
+        loc: { id: locationKey(value.locName, value.locType), name: value.locName, type: value.locType }, sample: value.sample });
     }
     return out;
-  }, [movements, analysisMode, dictMap, includeUnreviewed]);
+  }, [movements, batches, dataMode, analysisMode, dictMap, includeUnreviewed]);
 
   const rows = useMemo(() => {
     const itemSamples = new Map<string, { sample: InventoryMovement; aliasCount: number; reviewCount: number; tradeNames: Set<string> }>();
@@ -377,31 +363,41 @@ export default function Items() {
         const sample = meta.sample;
         let brBalance = 0;
         let brAmc = 0;
+        let complete = true;
+        let brBalancesKnown = true;
+        let mainBalancesKnown = true;
+        const snapshotDates = new Set<string>();
         const perBranch: Array<{ loc: { id: string; name: string; type: string }; balance: number; amc: number; adc: number; days: number | null; bucket: CoverageBucket }> = [];
 
         for (const b of branches) {
-          const v = perItemLoc.get(`${key}|${normalize(b.type)}|${normalize(b.name)}`);
+          const v = perItemLoc.get(`${key}|${locationKey(b.name, b.type)}`);
           if (!v) continue;
           brBalance += v.balance;
+          complete &&= v.valid;
+          brBalancesKnown &&= v.knownBalance;
+          snapshotDates.add(v.snapshot);
           brAmc += v.amc;
           const adc = v.amc / 30;
           const days = adc > 0 ? v.balance / adc : null;
-          perBranch.push({ loc: b, balance: v.balance, amc: v.amc, adc, days, bucket: bucketize(days, target, v.balance, adc) });
+          perBranch.push({ loc: b, balance: v.balance, amc: v.amc, adc, days, bucket: v.valid ? bucketize(days, target, v.balance, adc) : "no_data" });
         }
 
         const brAdc = brAmc / 30;
-        const brDays = brAdc > 0 ? brBalance / brAdc : null;
+        const branchesAligned = snapshotDates.size <= 1;
+        const brDays = complete && branchesAligned && brAdc > 0 ? brBalance / brAdc : null;
         let mainBalance = 0;
         let mainPresent = false;
         for (const m of mainStores) {
-          const v = perItemLoc.get(`${key}|${normalize(m.type)}|${normalize(m.name)}`);
+          const v = perItemLoc.get(`${key}|${locationKey(m.name, m.type)}`);
           if (!v) continue;
           mainPresent = true;
           mainBalance += v.balance;
+          mainBalancesKnown &&= v.knownBalance;
+          snapshotDates.add(v.snapshot);
         }
-        const mainDays = hasMain && brAdc > 0 ? mainBalance / brAdc : null;
+        const mainDays = mainPresent && mainBalancesKnown && complete && snapshotDates.size <= 1 && brAdc > 0 ? mainBalance / brAdc : null;
         const hospitalBalance = brBalance + mainBalance;
-        const hospitalDays = hasMain && brAdc > 0 ? hospitalBalance / brAdc : null;
+        const hospitalDays = mainPresent && mainBalancesKnown && complete && snapshotDates.size <= 1 && brAdc > 0 ? hospitalBalance / brAdc : null;
 
         return {
           key,
@@ -415,10 +411,12 @@ export default function Items() {
           scientificName: sample.scientific_name,
           unit: sample.unit,
           brBalance,
+          brBalancesKnown,
+          mainBalancesKnown,
           brAmc,
           brAdc,
           brDays,
-          brBucket: bucketize(brDays, target, brBalance, brAdc),
+          brBucket: complete && branchesAligned ? bucketize(brDays, target, brBalance, brAdc) : "no_data" as CoverageBucket,
           mainBalance,
           mainPresent,
           mainDays,
@@ -484,8 +482,8 @@ export default function Items() {
       if (b.adc <= 0) return b.balance > 0 ? `لا يوجد صرف من هذا الصنف في ${b.loc.name} رغم وجود رصيد ${fmtNum(b.balance)} وحدة.` : `لا يوجد رصيد ولا صرف من هذا الصنف في ${b.loc.name}.`;
       return `هذا الصنف يغطي ${b.days!.toFixed(0)} يوم في ${b.loc.name}، لأن الرصيد الحالي ${fmtNum(b.balance)} وحدة ومتوسط الصرف اليومي ${fmtNum(b.adc, 1)} وحدة.`;
     }
-    if (r.brAdc <= 0) return r.brBalance > 0 ? `لا يوجد صرف على مستوى الصيدليات الفرعية رغم وجود رصيد ${fmtNum(r.brBalance)} وحدة.` : "لا يوجد رصيد ولا صرف على مستوى الصيدليات الفرعية.";
-    return `الصيدليات الفرعية تغطي ${r.brDays!.toFixed(0)} يوم: رصيد ${fmtNum(r.brBalance)} ÷ متوسط الصرف اليومي ${fmtNum(r.brAdc, 1)}.`;
+    if (r.brAdc <= 0) return r.brBalance > 0 ? `لا يوجد صرف على مستوى الصيدليات الفرعية رغم وجود رصيد ${(r.brBalancesKnown ? fmtNum(r.brBalance) : "غير مكتمل")} وحدة.` : "لا يوجد رصيد ولا صرف على مستوى الصيدليات الفرعية.";
+    return `الصيدليات الفرعية تغطي ${r.brDays!.toFixed(0)} يوم: رصيد ${(r.brBalancesKnown ? fmtNum(r.brBalance) : "غير مكتمل")} ÷ متوسط الصرف اليومي ${fmtNum(r.brAdc, 1)}.`;
   }
 
   const loading = batchesQuery.isLoading || movementsQuery.isLoading;
@@ -642,7 +640,7 @@ export default function Items() {
                   <th className="text-right p-2 sticky right-0 bg-card min-w-[300px] w-[26%]">المادة العلاجية</th>
                   <th className="text-right p-2 min-w-[140px]">الصيدلية / النطاق</th>
                   {detailed && <th className="text-right p-2">رصيد الفرعية</th>}
-                  {detailed && <th className="text-right p-2">منصرف شهري</th>}
+                  {detailed && <th className="text-right p-2">متوسط منصرف (30 يومًا)</th>}
                   {detailed && <th className="text-right p-2">متوسط يومي</th>}
                   <th className="text-right p-2 whitespace-nowrap">يكفي (يوم)</th>
                   {detailed && hasMain && <th className="text-right p-2">رصيد المخزن الرئيسي</th>}
@@ -677,9 +675,9 @@ export default function Items() {
                         {detailed && <td className="p-2 align-top whitespace-nowrap">{fmtNum(b.amc, 1)}</td>}
                         {detailed && <td className="p-2 align-top whitespace-nowrap">{fmtNum(b.adc, 2)}</td>}
                         <td className="p-2 align-top whitespace-nowrap font-semibold">{b.days == null ? "—" : `${b.days.toFixed(0)} يوم`}</td>
-                        {detailed && hasMain && <td className="p-2 align-top whitespace-nowrap">{fmtNum(r.mainBalance)}</td>}
+                        {detailed && hasMain && <td className="p-2 align-top whitespace-nowrap">{(r.mainPresent && r.mainBalancesKnown ? fmtNum(r.mainBalance) : "غير مسجل")}</td>}
                         {detailed && hasMain && <td className="p-2 align-top whitespace-nowrap">{r.mainDays == null ? "—" : `${r.mainDays.toFixed(0)} يوم`}</td>}
-                        {detailed && hasMain && <td className="p-2 align-top whitespace-nowrap">{fmtNum(r.hospitalBalance)}</td>}
+                        {detailed && hasMain && <td className="p-2 align-top whitespace-nowrap">{(r.mainPresent && r.mainBalancesKnown && r.brBalancesKnown ? fmtNum(r.hospitalBalance) : "غير مكتمل")}</td>}
                         {detailed && hasMain && <td className="p-2 align-top whitespace-nowrap">{r.hospitalDays == null ? "—" : `${r.hospitalDays.toFixed(0)} يوم`}</td>}
                         <td className="p-2"><span className={`px-2 py-1 rounded text-xs ${BUCKET_CLASS[b.bucket]}`}>{BUCKET_LABEL[b.bucket]}</span></td>
                         <td className="p-2 text-xs align-top whitespace-normal break-words" dir="auto">{recommendation(r)}</td>
@@ -697,13 +695,13 @@ export default function Items() {
                             <DetailsBlock title={`تفاصيل: ${r.itemName} — ${b.loc.name}`}
                               items={[
                                 ["رصيد الصيدلية", fmtNum(b.balance)],
-                                ["المنصرف الشهري", fmtNum(b.amc, 1)],
+                                ["متوسط منصرف (30 يومًا)", fmtNum(b.amc, 1)],
                                 ["متوسط يومي", fmtNum(b.adc, 2)],
                                 ["تغطية الصيدلية (يوم)", b.days == null ? "—" : `${b.days.toFixed(0)}`],
                                 ...(hasMain ? ([
-                                  ["رصيد المخزن الرئيسي", fmtNum(r.mainBalance)],
+                                  ["رصيد المخزن الرئيسي", (r.mainPresent && r.mainBalancesKnown ? fmtNum(r.mainBalance) : "غير مسجل")],
                                   ["تغطية المخزن (يوم)", r.mainDays == null ? "—" : `${r.mainDays.toFixed(0)}`],
-                                  ["إجمالي رصيد المستشفى", fmtNum(r.hospitalBalance)],
+                                  ["إجمالي رصيد المستشفى", (r.mainPresent && r.mainBalancesKnown && r.brBalancesKnown ? fmtNum(r.hospitalBalance) : "غير مكتمل")],
                                   ["تغطية المستشفى (يوم)", r.hospitalDays == null ? "—" : `${r.hospitalDays.toFixed(0)}`],
                                 ] as [string, string][]) : []),
                               ]}
@@ -728,13 +726,13 @@ export default function Items() {
                         )}
                       </td>
                       <td className="p-2 text-xs text-muted-foreground align-top whitespace-normal break-words" dir="auto">{scopeLabel(r)}</td>
-                      {detailed && <td className="p-2 align-top whitespace-nowrap">{fmtNum(r.brBalance)}</td>}
+                      {detailed && <td className="p-2 align-top whitespace-nowrap">{(r.brBalancesKnown ? fmtNum(r.brBalance) : "غير مكتمل")}</td>}
                       {detailed && <td className="p-2 align-top whitespace-nowrap">{fmtNum(r.brAmc, 1)}</td>}
                       {detailed && <td className="p-2 align-top whitespace-nowrap">{fmtNum(r.brAdc, 2)}</td>}
                       <td className="p-2 align-top whitespace-nowrap font-semibold">{r.brDays == null ? "—" : `${r.brDays.toFixed(0)} يوم`}</td>
-                      {detailed && hasMain && <td className="p-2 align-top whitespace-nowrap">{fmtNum(r.mainBalance)}</td>}
+                      {detailed && hasMain && <td className="p-2 align-top whitespace-nowrap">{(r.mainPresent && r.mainBalancesKnown ? fmtNum(r.mainBalance) : "غير مسجل")}</td>}
                       {detailed && hasMain && <td className="p-2 align-top whitespace-nowrap">{r.mainDays == null ? "—" : `${r.mainDays.toFixed(0)} يوم`}</td>}
-                      {detailed && hasMain && <td className="p-2 align-top whitespace-nowrap">{fmtNum(r.hospitalBalance)}</td>}
+                      {detailed && hasMain && <td className="p-2 align-top whitespace-nowrap">{(r.mainPresent && r.mainBalancesKnown && r.brBalancesKnown ? fmtNum(r.hospitalBalance) : "غير مكتمل")}</td>}
                       {detailed && hasMain && <td className="p-2 align-top whitespace-nowrap">{r.hospitalDays == null ? "—" : `${r.hospitalDays.toFixed(0)} يوم`}</td>}
                       <td className="p-2"><span className={`px-2 py-1 rounded text-xs ${BUCKET_CLASS[bucket]}`}>{BUCKET_LABEL[bucket]}</span></td>
                       <td className="p-2 text-xs align-top whitespace-normal break-words" dir="auto">{recommendation(r)}</td>
@@ -751,18 +749,18 @@ export default function Items() {
                         <td colSpan={20} className="p-4 text-xs">
                           <DetailsBlock title={`تفاصيل: ${r.itemName} — ${scopeLabel(r)}`}
                             items={[
-                              ["رصيد الصيدليات الفرعية", fmtNum(r.brBalance)],
-                              ["المنصرف الشهري (إجمالي)", fmtNum(r.brAmc, 1)],
+                              ["رصيد الصيدليات الفرعية", (r.brBalancesKnown ? fmtNum(r.brBalance) : "غير مكتمل")],
+                              ["متوسط منصرف الفروع (30 يومًا)", fmtNum(r.brAmc, 1)],
                               ["متوسط يومي", fmtNum(r.brAdc, 2)],
                               ["تغطية الفرعية (يوم)", r.brDays == null ? "—" : `${r.brDays.toFixed(0)}`],
                               ...(hasMain ? ([
-                                ["رصيد المخزن الرئيسي", fmtNum(r.mainBalance)],
+                                ["رصيد المخزن الرئيسي", (r.mainPresent && r.mainBalancesKnown ? fmtNum(r.mainBalance) : "غير مسجل")],
                                 ["تغطية المخزن (يوم)", r.mainDays == null ? "—" : `${r.mainDays.toFixed(0)}`],
-                                ["إجمالي رصيد المستشفى", fmtNum(r.hospitalBalance)],
+                                ["إجمالي رصيد المستشفى", (r.mainPresent && r.mainBalancesKnown && r.brBalancesKnown ? fmtNum(r.hospitalBalance) : "غير مكتمل")],
                                 ["تغطية المستشفى (يوم)", r.hospitalDays == null ? "—" : `${r.hospitalDays.toFixed(0)}`],
                               ] as [string, string][]) : []),
                             ]}
-                            calc={`الحساب: ${fmtNum(r.brBalance)} ÷ ${fmtNum(r.brAdc, 2)} = ${r.brDays == null ? "—" : r.brDays.toFixed(1)} يوم (هدف ${target}).`}
+                            calc={`الحساب: ${(r.brBalancesKnown ? fmtNum(r.brBalance) : "غير مكتمل")} ÷ ${fmtNum(r.brAdc, 2)} = ${r.brDays == null ? "—" : r.brDays.toFixed(1)} يوم (هدف ${target}).`}
                             why={whyText(r)} />
                         </td>
                       </tr>

@@ -1,6 +1,11 @@
 const { app, BrowserWindow, ipcMain, Menu, dialog, screen } = require("electron");
 const path = require("path");
 const fs = require("fs");
+const runtime=require('./runtime.cjs').configureRuntime(app);
+// Use the CPU renderer by default on hospital devices; never disable the sandbox.
+if(process.env.DAWA_HARDWARE_ACCELERATION!=='1')app.disableHardwareAcceleration();
+const primary=app.requestSingleInstanceLock();
+if(!primary)app.quit();
 
 const isDev = !app.isPackaged;
 const DEV_SERVER_URL = process.env.VITE_DEV_SERVER_URL || "http://127.0.0.1:5180/";
@@ -43,6 +48,7 @@ function createWindow() {
     minWidth: 1024,
     minHeight: 600,
     title: "دواء - إدارة أرصدة المستشفى",
+    icon: fs.existsSync(path.join(__dirname,'assets','dawa.ico'))?path.join(__dirname,'assets','dawa.ico'):path.join(__dirname,'..','build','icon.ico'),
     show: true,
     center: true,
     autoHideMenuBar: true,
@@ -156,6 +162,7 @@ function createWindow() {
 }
 
 function registerIpc() {
+  ipcMain.handle("operations:call", (_e, a) => require("./ipc/operations.cjs").call(a));
   ipcMain.handle("auth:login", (_e, a) => auth.login(a));
   ipcMain.handle("auth:logout", (_e, a) => auth.logout(a));
   ipcMain.handle("auth:me", (_e, a) => auth.getCurrentUser(a));
@@ -192,13 +199,15 @@ function registerIpc() {
   ipcMain.handle("app:dbPath", () => ({ ok: true, path: getDbPath() }));
 }
 
-app.whenReady().then(() => {
+if(primary)app.whenReady().then(async () => {
   console.log("app ready");
   Menu.setApplicationMenu(null);
 
   // Initialise the database first; if the native module or schema fails,
   // show the real error instead of leaving the app running with no window.
   try {
+    const restored=await require('./db/restore.cjs').applyPendingRestore(runtime.dataDir);
+    if(restored.applied)await require('electron').session.defaultSession.clearStorageData();
     loadBackendModules();
     getDb();
     ensureSeed();
@@ -251,3 +260,5 @@ process.on("unhandledRejection", (reason) => {
 app.on("window-all-closed", () => {
   if (process.platform !== "darwin") app.quit();
 });
+app.on('second-instance',()=>{if(mainWindow){if(mainWindow.isMinimized())mainWindow.restore();mainWindow.show();mainWindow.focus();}});
+app.on('will-quit',()=>{try{require('./db/sqlite.cjs').closeDb();}catch(e){console.error('Database close deferred to process exit:',e.message);}});

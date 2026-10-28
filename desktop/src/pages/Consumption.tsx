@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { loadContinuousAnalysis, type ProjectedRow } from "@/lib/continuousAnalysis";
 import { summarizeConsumption } from "../../../shared/consumptionReport";
+import {consumptionPeriodLabel} from '../../../shared/inventoryHistory';
 
 const fmt = (value: number) => value.toLocaleString("ar-EG", { maximumFractionDigits: 2 });
 
@@ -62,7 +63,7 @@ export default function Consumption() {
             <td className="p-3">{row.locationName}</td>
             <td className="p-3">{period ? fmt(period.issued) : "غير مسجل"}</td>
             <td className="p-3">{row.unit || "غير مؤكدة"}</td>
-            <td className="p-3">{!period ? "لم يسجل منصرف للفترة" : period.reportedSkus < period.totalSkus ? "جزئي" : "مسجل"}</td>
+            <td className="p-3">{!period ? "لم يسجل منصرف للفترة" : period.reportedSkus < period.totalSkus || period.partial ? "جزئي" : "مسجل"}{period&&<div className="text-xs">{consumptionPeriodLabel(period)}</div>}</td>
           </tr>)}</tbody>
         </table>
       </div>

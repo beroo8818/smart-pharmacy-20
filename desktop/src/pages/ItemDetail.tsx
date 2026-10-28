@@ -1,5 +1,7 @@
 import { loadContinuousAnalysis } from "@/lib/continuousAnalysis";
-import { useEffect, useMemo, useState } from "react";
+import StockCalculationReview from "../../../shared/components/StockCalculationReview";
+import { useCallback, useMemo, useState } from "react";
+import {useLiveInventory} from '../../../shared/useLiveInventory';
 import { Link, useSearchParams, useParams } from "react-router-dom";
 import { api, tokenStore, Movement, UploadBatch } from "@/integrations/desktop/client";
 import {
@@ -26,16 +28,9 @@ export default function ItemDetail() {
   const { id } = useParams();
   const key = id || sp.get("key") || "";
   const [target, setTarget] = useState(30);
-  const [batch, setBatch] = useState<UploadBatch | null>(null);
-  const [currentRows, setCurrentRows] = useState<Awaited<ReturnType<typeof loadContinuousAnalysis>>["rows"]>([]);
-  const [loading, setLoading] = useState(true);
-
-  useEffect(() => { (async () => {
-    try {
-      const d = await loadContinuousAnalysis({ targetDays: target });
-      setBatch(d.latestBatch); setCurrentRows(d.rows);
-    } finally { setLoading(false); }
-  })(); }, [target]);
+  const loader=useCallback(()=>loadContinuousAnalysis({targetDays:target}),[target]);
+  const {data,loading,error}=useLiveInventory(loader);
+  const batch=data?.latestBatch||null,currentRows=data?.rows||[];
 
   const allRows = currentRows;
   const itemRows = useMemo(() => allRows.filter((r) => r.itemKey === key), [allRows, key]);
@@ -48,6 +43,7 @@ export default function ItemDetail() {
   const mainBalance = mainRows.reduce((s, r) => s + r.balance, 0);
   const branchBalance = branchRows.reduce((s, r) => s + r.balance, 0);
   const hospitalBalance = mainBalance + branchBalance;
+  const balanceLabel = (list: typeof itemRows) => !list.length || list.some(r=>!r.hasBalance) ? 'غير مؤكد' : fmtNum(list.reduce((sum,r)=>sum+r.balance,0));
   const totalIssued = branchRows.reduce((s, r) => s + r.issued, 0);
   const hospitalAdc = branchRows.reduce((sum, row) => sum + row.adc, 0);
   const branchesAdc = branchRows.reduce((s, r) => s + r.adc, 0);
@@ -89,6 +85,7 @@ export default function ItemDetail() {
 
   if (incomplete) decision = { kind: "watch", text: "راجع البيانات أولًا", reason: "بيانات غير مكتملة أو أرصدة بتواريخ مختلفة." };
 
+  if(error)return <p role="alert" className="p-6">تعذر تحديث الصنف: {error}. الرصيد السابق ليس تحديثًا ناجحًا.</p>;
   if (loading) return <div className="p-6 text-muted-fg">جارٍ التحميل...</div>;
   if (!header) return <div className="p-6">صنف غير موجود في آخر دفعة. <Link className="text-primary" to="/dictionary">عودة للقاموس</Link></div>;
 
@@ -118,9 +115,9 @@ export default function ItemDetail() {
       <section className="card p-5">
         <div className="font-bold mb-3">ملخص سريع</div>
         <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3 text-sm">
-          <Stat label="إجمالي رصيد الصيدليات" value={fmtNum(branchBalance)} />
-          <Stat label="رصيد المخزن الرئيسي" value={fmtNum(mainBalance)} />
-          <Stat label="إجمالي رصيد المستشفى" value={fmtNum(hospitalBalance)} />
+              <Stat label="إجمالي رصيد الصيدليات" value={balanceLabel(branchRows)} />
+              <Stat label="رصيد المخزن الرئيسي" value={balanceLabel(mainRows)} />
+              <Stat label="إجمالي رصيد المستشفى" value={balanceLabel(itemRows)} />
           <Stat label="متوسط الصرف اليومي" value={fmtNum(hospitalAdc, 1)} />
           <Stat label="تغطية المستشفى (يوم)" value={hospitalDays == null ? "—" : fmtNum(hospitalDays)} />
           <Stat label="كود الصنف" value={header.itemCode || "—"} />
@@ -135,7 +132,8 @@ export default function ItemDetail() {
         </div>
       </section>
 
-      {/* 2. جدول الصيدليات */}
+          <StockCalculationReview rows={itemRows} />
+          {/* 2. جدول الصيدليات */}
       <section className="card p-5">
         <div className="font-bold mb-3">تغطية الصنف لكل صيدلية</div>
         <div className="overflow-x-auto border border-border rounded">
@@ -157,7 +155,7 @@ export default function ItemDetail() {
                   <td className="p-2 font-semibold">{r.locationName}
                     <div className="text-[10px] text-muted-fg">{isMainLocation(r.locationType) ? "مخزن رئيسي" : "صيدلية فرعية"}</div>
                   </td>
-                  <td className="p-2 text-center">{fmtNum(r.balance)}</td>
+                  <td className="p-2 text-center">{r.hasBalance ? fmtNum(r.balance) : 'غير مؤكد'}</td>
                   <td className="p-2 text-center">{fmtNum(r.issued)}</td>
                   <td className="p-2 text-center">{fmtNum(r.adc, 1)}</td>
                   <td className="p-2 text-center font-semibold">{r.days == null ? "—" : r.days.toFixed(0)}</td>

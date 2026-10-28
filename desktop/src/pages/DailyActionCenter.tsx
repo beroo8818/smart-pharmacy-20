@@ -1,4 +1,9 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useMemo, useState } from "react";
+import {useAuth} from '@/hooks/useAuth';
+import {hasPermission} from '../../../shared/accessPolicy';
+import {loadNativeActions,latestDecisions} from '../../../shared/recommendationActions';
+import {operationsCall} from '@/lib/operationsClient';
+import {useLiveInventory} from '../../../shared/useLiveInventory';
 import { api, tokenStore, type UploadBatch } from "@/integrations/desktop/client";
 import { fmtMonth, fmtNum, isMainLocation, type AnalysisRow } from "@/lib/desktopAnalytics";
 import { loadContinuousAnalysis, type ProjectedRow } from "@/lib/continuousAnalysis";
@@ -39,6 +44,7 @@ type Rec = {
   itemName: string;
   tradeNames: string[];
   itemCode: string | null;
+  unit?:string|null;
   to: string;
   from?: string;
   problem: string;
@@ -51,53 +57,38 @@ type Rec = {
 
 type Decision = { status: DecisionStatus; at: string; qty?: number | null; note?: string | null; rec: Rec };
 
-const LS_KEY = (batchId: string) => `desktop_decisions_${batchId}`;
-function loadDecisions(batchId: string): Record<string, Decision> {
-  try { return JSON.parse(localStorage.getItem(LS_KEY(batchId)) || "{}"); } catch { return {}; }
-}
-function saveDecisions(batchId: string, d: Record<string, Decision>) {
-  localStorage.setItem(LS_KEY(batchId), JSON.stringify(d));
-}
-
 export default function DailyActionCenter() {
-  const [batch, setBatch] = useState<UploadBatch | null>(null);
-  const [rows, setRows] = useState<ProjectedRow[]>([]);
-  const [preliminary, setPreliminary] = useState(false);
   const [monthsWindow, setMonthsWindow] = useState(3);
-  const [loading, setLoading] = useState(true);
   const [target, setTarget] = useState(30);
   const [q, setQ] = useState("");
   const [prioFilter, setPrioFilter] = useState<"all" | Priority>("all");
   const [whyOpen, setWhyOpen] = useState<string | null>(null);
-  const [decisions, setDecisions] = useState<Record<string, Decision>>({});
+  const [saving,setSaving]=useState(false),[actionError,setActionError]=useState('');
+  const {roles,access}=useAuth(),canDecide=hasPermission(roles,access,'decisions.write');
 
-  useEffect(() => { (async () => {
-    setLoading(true);
-    const d = await loadContinuousAnalysis({ monthsWindow, targetDays: target, groupBy: "sku" });
-    setBatch(d.latestBatch); setRows(d.rows); setPreliminary(d.preliminary); setLoading(false);
-    if (d.latestBatch) setDecisions(loadDecisions(d.latestBatch.id));
-  })(); }, [monthsWindow, target]);
+  const loader=useCallback(async()=>{
+    const analysis=await loadContinuousAnalysis({monthsWindow,targetDays:target,groupBy:'sku'});
+    const decisions=analysis.latestBatch?latestDecisions(await loadNativeActions(operationsCall,analysis.latestBatch.id)):{};
+    return {...analysis,decisions};
+  },[monthsWindow,target]);
+  const {data,loading,error}=useLiveInventory(loader);
+  const batch=data?.latestBatch||null,rows=data?.rows||[],preliminary=data?.preliminary||false;
+  const decisions=data?.decisions||{};
 
   async function setDecision(r: Rec, status: DecisionStatus) {
-    if (!batch) return;
+    if (!batch||saving||!canDecide||loading) return;
     let qty: number | null | undefined; let note: string | null | undefined;
     if (status === "executed") {
       const qStr = window.prompt("الكمية المنفذة فعلًا:", String(r.qty ?? ""));
       if (qStr === null) return;
       note = window.prompt("ملاحظة (اختياري):", "") || null;
       const n = qStr.trim() === "" ? NaN : Number(qStr);
-      qty = Number.isFinite(n) ? n : null;
+      if(!Number.isFinite(n)||n<=0){setActionError('اكتب كمية منفذة موجبة');return;}
+      qty = n;
     }
-    const next = { ...decisions, [r.id]: { status, at: new Date().toISOString(), qty, note, rec: r } };
-    setDecisions(next);
-    saveDecisions(batch.id, next);
-    await api.audit.insert({
-      token: tokenStore.get(),
-      action: "recommendation_decision",
-      entity: "recommendation_action",
-      entity_id: r.id,
-      details: { batchId: batch.id, status, qty, note, rec: r },
-    });
+    setSaving(true);setActionError('');
+    try{await operationsCall('recommendation_save',{upload_batch_id:batch.id,recommendation_key:r.id,recommendation_type:r.kind,item_key:r.itemKey,item_name:r.itemName,item_code:r.itemCode,unit:r.unit||null,from_location:r.from||null,to_location:r.to,suggested_qty:r.qty??null,executed_qty:qty??null,note:note||null,status,client_id:crypto.randomUUID()});}
+    catch(e){setActionError((e as Error).message);}finally{setSaving(false);}
   }
 
   const recs = useMemo<Rec[]>(() => {
@@ -126,7 +117,7 @@ export default function DailyActionCenter() {
       for (const b of branches.filter((x) => x.days != null && x.days < 7)) {
         out.push({
           id: `ur:${b.itemKey}:${b.locationName}`, section: "urgent",
-          itemKey: recItemKey, itemName, tradeNames, itemCode, to: b.locationName,
+          itemKey: recItemKey, itemName, tradeNames, itemCode,unit:s.unit, to: b.locationName,
           problem: `الرصيد ${fmtNum(b.balance)} يكفي ${b.days?.toFixed(1)} يوم فقط — أقل من 7 أيام.`,
           action: `وفّر الصنف فورًا لـ ${b.locationName}.`,
           why: `الرصيد ${fmtNum(b.balance)} ÷ متوسط الصرف اليومي ${fmtNum(b.adc, 2)} = ${b.days?.toFixed(1)} يوم.`,
@@ -153,7 +144,7 @@ export default function DailyActionCenter() {
           const toAfterBal = n.loc.balance + give, toAfterDays = n.loc.adc > 0 ? toAfterBal / n.loc.adc : null;
           out.push({
             id: `dm:${n.loc.itemKey}:${n.loc.locationName}:${ms.locationName}`, section: "main",
-            itemKey: recItemKey, itemName, tradeNames, itemCode, to: n.loc.locationName, from: ms.locationName,
+            itemKey: recItemKey, itemName, tradeNames, itemCode,unit:s.unit, to: n.loc.locationName, from: ms.locationName,
             problem: `${n.loc.locationName} تغطي ${n.loc.days?.toFixed(1) ?? "—"} يوم — أقل من الهدف ${target}.`,
             action: `اصرف ${fmtNum(give)} من ${ms.locationName} إلى ${n.loc.locationName}.`,
             why: `احتياج الصيدلية = ${fmtNum(Math.ceil(n.loc.adc * target - n.loc.balance))}. المخزن: رصيد ${fmtNum(beforeBal)} − احتياطي ${fmtNum(Math.ceil(reserve))} = متاح ${fmtNum(avail)}. تغطية المخزن ${beforeDays?.toFixed(0) ?? "—"} ← ${afterDays?.toFixed(0) ?? "—"} يوم. تغطية الصيدلية ${n.loc.days?.toFixed(0) ?? "—"} ← ${toAfterDays?.toFixed(0) ?? "—"} يوم.`,
@@ -180,7 +171,7 @@ export default function DailyActionCenter() {
             const toAfterDays = n.loc.adc > 0 ? toAfterBal / n.loc.adc : null;
             out.push({
               id: `tr:${n.loc.itemKey}:${n.loc.locationName}:${d.loc.locationName}`, section: "transfer",
-              itemKey: recItemKey, itemName, tradeNames, itemCode, to: n.loc.locationName, from: d.loc.locationName,
+              itemKey: recItemKey, itemName, tradeNames, itemCode,unit:s.unit, to: n.loc.locationName, from: d.loc.locationName,
               problem: `${d.loc.locationName} لديها فائض (${fromBeforeDays?.toFixed(0)} يوم)، ${n.loc.locationName} ناقصة (${toBeforeDays?.toFixed(0)} يوم).`,
               action: `حوّل ${fmtNum(give)} من ${d.loc.locationName} إلى ${n.loc.locationName}.`,
               why: (mainBlocked.length ? mainBlocked.join(" ") + " " : "") + `المرسل: ${fromBeforeDays?.toFixed(0)} ← ${newFromDays?.toFixed(0)} يوم. المستقبل: ${toBeforeDays?.toFixed(0)} ← ${toAfterDays?.toFixed(0)} يوم.`,
@@ -199,7 +190,7 @@ export default function DailyActionCenter() {
         if (!dead && !veryOver) continue;
         out.push({
           id: `nd:${b.itemKey}:${b.locationName}`, section: "no_order",
-          itemKey: recItemKey, itemName, tradeNames, itemCode, to: b.locationName,
+          itemKey: recItemKey, itemName, tradeNames, itemCode,unit:s.unit, to: b.locationName,
           problem: dead ? `رصيد ${fmtNum(b.balance)} بدون أي صرف هذا الشهر — صنف راكد.` : `الرصيد يغطي ${b.days?.toFixed(0)} يوم — أكثر من ضعف الهدف.`,
           action: dead ? "لا تطلب — راجع جدوى الاحتفاظ به." : "لا تطلب هذا الشهر.",
           why: `رصيد ${fmtNum(b.balance)} • منصرف ${fmtNum(b.issued)} • ${b.days?.toFixed(0) ?? "—"} يوم.`,
@@ -209,7 +200,7 @@ export default function DailyActionCenter() {
       for (const b of branches.filter((x) => x.kind === "no_data")) {
         out.push({
           id: `rv:${b.itemKey}:${b.locationName}`, section: "review",
-          itemKey: recItemKey, itemName, tradeNames, itemCode, to: b.locationName,
+          itemKey: recItemKey, itemName, tradeNames, itemCode,unit:s.unit, to: b.locationName,
           problem: "البيانات غير كافية للحساب (لا صرف ولا رصيد واضح).",
           action: "راجع صف هذا الصنف في ملف الإكسل.",
           why: `رصيد ${fmtNum(b.balance)} • منصرف ${fmtNum(b.issued)}.`,
@@ -267,10 +258,9 @@ export default function DailyActionCenter() {
           <button className="btn-outline text-xs px-2 py-1" onClick={() => setWhyOpen(open ? null : r.id)}>لماذا؟</button>
           <div className="flex flex-wrap gap-1.5 items-center">
             <span className="px-2 py-0.5 rounded text-[10px] border border-border text-muted-fg">{STATUS_LABEL[st]}</span>
-            <button className="btn-outline text-xs px-2 py-1" onClick={() => setDecision(r, "approved")}>اعتماد</button>
-            <button className="btn-outline text-xs px-2 py-1" onClick={() => setDecision(r, "postponed")}>تأجيل</button>
-            <button className="btn-outline text-xs px-2 py-1" onClick={() => setDecision(r, "rejected")}>رفض</button>
-            <button className="btn-outline text-xs px-2 py-1" onClick={() => setDecision(r, "executed")}>تنفيذ</button>
+            <button disabled={!canDecide||saving||loading} className="btn-outline text-xs px-2 py-1" onClick={() => setDecision(r, "postponed")}>تأجيل</button>
+            <button disabled={!canDecide||saving||loading} className="btn-outline text-xs px-2 py-1" onClick={() => setDecision(r, "rejected")}>رفض</button>
+            <button disabled={!canDecide||saving||loading} className="btn-outline text-xs px-2 py-1" onClick={() => setDecision(r, "executed")}>تسجيل كمنفذ</button>
           </div>
         </div>
         {open && <div className="mt-3 text-xs text-muted-fg bg-muted rounded p-3" dir="auto">{r.why}</div>}
@@ -278,9 +268,12 @@ export default function DailyActionCenter() {
     );
   }
 
+  if(error)return <p role="alert" className="p-6">تعذر تحديث توصيات العمل: {error}. راجع الاتصال قبل التنفيذ.</p>;
   return (
     <div className="p-6 space-y-5">
       <header>
+        <p>القرارات تحفظ في قاعدة البيانات وتدخل النسخ الاحتياطي. الحالة لا تغير المخزون؛ سجل الحركة الفعلية مرة واحدة من سجل الحركات.</p>
+        {actionError&&<p role="alert">{actionError}</p>}
         <div className="flex items-center justify-between gap-3 flex-wrap">
           <div>
             <h1 className="text-2xl font-bold">مركز العمل اليومي</h1>

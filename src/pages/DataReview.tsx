@@ -1,3 +1,5 @@
+import {useAuth as usePermissionsAuth} from '@/hooks/useAuth';
+import {hasPermission} from '../../shared/accessPolicy';
 import PageHeader from "@/components/PageHeader";
 import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -222,6 +224,9 @@ function detectIssues(movs: Movement[]): Issue[] {
 }
 
 export default function DataReview() {
+  const permissionAuth=usePermissionsAuth();
+  const mayReportExport=hasPermission(permissionAuth.roles,permissionAuth.access,'report.export');
+  const mayReportPrint=hasPermission(permissionAuth.roles,permissionAuth.access,'report.print');
   const { data: batch } = useQuery({
     queryKey: ["latest-batch-review"],
     queryFn: fetchLatestBatch,
@@ -339,6 +344,7 @@ export default function DataReview() {
     ws["!cols"] = head.map(() => ({ wch: 22 }));
     const wb = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(wb, ws, "مراجعة البيانات");
+    if(!mayReportExport){window.alert('تصدير التقارير غير مسموح لهذا الحساب');return;}
     XLSX.writeFile(wb, "مراجعة_البيانات_المشكوك_فيها.xlsx");
   }
 

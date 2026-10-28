@@ -5,6 +5,7 @@ function call(channel) {
 }
 
 contextBridge.exposeInMainWorld("api", {
+  operations: { call: call("operations:call") },
   auth: {
     login: call("auth:login"),
     logout: call("auth:logout"),

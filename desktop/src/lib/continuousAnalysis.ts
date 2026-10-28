@@ -1,4 +1,5 @@
 import { buildInventoryHistory, locationKey, stockBalances, todayISO, type ConsumptionPeriod } from "../../../shared/inventoryHistory";
+import { applyStockLedger,forecastForUncoveredDays } from "../../../shared/stockLedger";
 import { api, tokenStore, type Movement, type UploadBatch, type StockTxn } from "@/integrations/desktop/client";
 import {
   itemKey, itemKeyAliases, itemDisplayName, itemTradeNames, normalize, num, isMainLocation,
@@ -23,9 +24,15 @@ export type ProjectedRow = AnalysisRow & {
   hasConsumption: boolean;
   mixedSnapshots: boolean;
   recordedBalance: number;
+  recordedDays: number | null;
+  projectedDays: number | null;
+  ledgerNet: number;
+  ledgerWarnings: string[];
+  snapshotBoundary: string | null;
   projectionSuppressed: boolean;
   snapshotBalance: number;
   projectedBalance: number;
+  projectedKind: AlertKind;
   daysSinceSnapshot: number;
   expectedConsumption: number;
   receiptsAfter: number;
@@ -105,7 +112,14 @@ export async function loadContinuousAnalysis(opts: {
   const selected = batches.filter((b) => (b.snapshot_date || b.month) <= asOf && (!opts.batchIds || opts.batchIds.includes(b.id)));
   const mRes = await api.queries.movementsByBatchIds({ token, batchIds: selected.map((b) => b.id) });
   if (!mRes.ok) throw new Error("تعذر قراءة بيانات الأرصدة");
-  const movements = (mRes.movements || []) as Movement[];
+  let movements = (mRes.movements || []) as Movement[];
+  if(api.operations?.call){
+    const result=await api.operations.call({token,action:'local_table',payload:{table:'active_ingredient_dictionary',operation:'select',filters:[]}});
+    if(!result.ok)throw new Error(result.error||'تعذر قراءة القاموس المحلي');
+    const dictionary=new Map<string,any>();
+    for(const entry of result.rows||[])if(entry.approved)for(const name of [entry.original_item_name,entry.scientific_name,entry.trade_name,entry.standard_name])if(name)dictionary.set(normalize(name),entry);
+    movements=movements.map(m=>{const d=dictionary.get(normalize(m.item_name_ar))||dictionary.get(normalize(m.active_ingredient_ar))||dictionary.get(normalize(m.item_name_en));return d?{...m,active_ingredient_ar:m.active_ingredient_ar||d.active_ingredient||d.scientific_name,item_name_en:m.item_name_en||d.trade_name,strength:m.strength||d.strength,dosage_form:m.dosage_form||d.dosage_form,unit:m.unit||d.unit,therapeutic_group_key:d.therapeutic_group_key}:m;});
+  }
   const history = buildInventoryHistory(selected, movements.map((m) => ({
     sample: m, batchId: m.upload_batch_id, item: historyItemKey(m),
     sku: [m.item_code, m.item_name_en, m.item_name_ar, m.unit].map(normalize).join("|"),
@@ -119,88 +133,14 @@ export async function loadContinuousAnalysis(opts: {
     itemTradeNames(movement).forEach((name) => names.add(name));
     namesByCell.set(key, names);
   }
-  const cells = new Map(history.map((cell, index) => [index, {
-    ...cell, tradeNames: namesByCell.get(`${historyItemKey(cell.sample)}|${locationKey(cell.locName, cell.locType)}`) || new Set<string>(),
-  }]));
-
-  const earliest = Array.from(cells.values()).reduce((acc, c) => (c.latestSnapshot < acc ? c.latestSnapshot : acc), asOf);
-  const txRes = await api.stockTxn.list({ token, sinceISO: earliest });
+  const earliest = history.filter(c=>c.hasBalance).reduce((acc,c)=>c.latestSnapshot<acc?c.latestSnapshot:acc,asOf);
+  const txRes = await api.stockTxn.list({ token, sinceISO: earliest, all: true });
+  if (!txRes.ok) throw new Error('تعذر قراءة الحركات الفعلية');
   const txns = (txRes.rows || []) as StockTxn[];
-
-  function locBucket(name: string | null, type: string | null) { return locationKey(name, type); }
-  const snapshotIndex = new Map<string, { snapshot: string; uploadedAt: string; mixed: boolean; unit: string | null }>();
-  const itemAliasToCanonical = new Map<string, string>();
-  const ambiguousAliases = new Set<string>();
-  for (const c of cells.values()) {
-    const canonical = historyItemKey(c.sample);
-    snapshotIndex.set(`${canonical}|${locBucket(c.locName, c.locType)}`, {
-      mixed: c.mixedSnapshots,
-      unit: c.sample.unit,
-      snapshot: c.latestSnapshot,
-      uploadedAt: c.latestUploadedAt,
-    });
-    for (const alias of itemKeyAliases(c.sample)) {
-      const prior = itemAliasToCanonical.get(alias);
-      if (prior && prior !== canonical) ambiguousAliases.add(alias);
-      else itemAliasToCanonical.set(alias, canonical);
-    }
-  }
-  for (const movement of movements) {
-    const canonical = historyItemKey(movement);
-    for (const alias of itemKeyAliases(movement)) {
-      const prior = itemAliasToCanonical.get(alias);
-      if (prior && prior !== canonical) ambiguousAliases.add(alias);
-      else itemAliasToCanonical.set(alias, canonical);
-    }
-  }
-
-  type TxnAgg = { receipts: number; issues: number; patientIssues: number; transfersIn: number; transfersOut: number; returns: number };
-  const txnIndex = new Map<string, Map<string, TxnAgg>>();
-  function ensureAgg(itemK: string, loc: string): TxnAgg {
-    let m = txnIndex.get(itemK);
-    if (!m) { m = new Map(); txnIndex.set(itemK, m); }
-    let a = m.get(loc);
-    if (!a) { a = { receipts: 0, issues: 0, patientIssues: 0, transfersIn: 0, transfersOut: 0, returns: 0 }; m.set(loc, a); }
-    return a;
-  }
-  function shouldApplyTxn(itemK: string, loc: string, t: StockTxn): boolean {
-    const ref = snapshotIndex.get(`${itemK}|${loc}`);
-    if (!ref || ref.mixed || (t.unit && normalize(t.unit) !== normalize(ref.unit))) return false;
-    if (t.txn_date > ref.snapshot) return true;
-    if (t.txn_date < ref.snapshot) return false;
-    if (!t.created_at || !ref.uploadedAt) return false;
-    return new Date(t.created_at).getTime() > new Date(ref.uploadedAt).getTime();
-  }
-  function applyTxn(itemK: string, loc: string, t: StockTxn, field: keyof TxnAgg, q: number) {
-    if (shouldApplyTxn(itemK, loc, t)) ensureAgg(itemK, loc)[field] += q;
-  }
-  function canonicalTxnKey(t: StockTxn): string {
-    const raw = normalize(t.item_code || t.item_key || t.item_name);
-    return ambiguousAliases.has(raw) ? "" : itemAliasToCanonical.get(raw) || raw;
-  }
-  for (const t of txns) {
-    if (t.txn_date > asOf) continue;
-    const q = num(t.qty);
-    if (q <= 0) continue;
-    const itm = canonicalTxnKey(t);
-    switch (t.txn_type) {
-      case "warehouse_receipt":
-        applyTxn(itm, locBucket(t.to_location_name, t.to_location_type || "main_warehouse"), t, "receipts", q); break;
-      case "warehouse_issue_to_pharmacy":
-        applyTxn(itm, locBucket(t.from_location_name, t.from_location_type || "main_warehouse"), t, "issues", q);
-        applyTxn(itm, locBucket(t.to_location_name, t.to_location_type || "sub_pharmacy"), t, "receipts", q); break;
-      case "pharmacy_issue":
-        applyTxn(itm, locBucket(t.from_location_name, t.from_location_type || "sub_pharmacy"), t, "issues", q);
-        applyTxn(itm, locBucket(t.from_location_name, t.from_location_type || "sub_pharmacy"), t, "patientIssues", q); break;
-      case "pharmacy_transfer":
-        applyTxn(itm, locBucket(t.from_location_name, t.from_location_type || "sub_pharmacy"), t, "transfersOut", q);
-        applyTxn(itm, locBucket(t.to_location_name, t.to_location_type || "sub_pharmacy"), t, "transfersIn", q); break;
-      case "warehouse_return":
-      case "pharmacy_return_to_warehouse":
-        applyTxn(itm, locBucket(t.from_location_name, t.from_location_type || "sub_pharmacy"), t, "issues", q);
-        applyTxn(itm, locBucket(t.to_location_name, t.to_location_type || "main_warehouse"), t, "receipts", q); break;
-    }
-  }
+  const ledger = applyStockLedger(history,txns,asOf,historyItemKey,itemKeyAliases,normalize,movements);
+  const cells = new Map(ledger.map((cell,index)=>[index,{
+    ...cell, tradeNames:namesByCell.get(`${historyItemKey(cell.sample)}|${locationKey(cell.locName,cell.locType)}`) || new Set(itemTradeNames(cell.sample)),
+  }]));
 
   const branchAdcByItem = new Map<string, number>();
   for (const c of cells.values()) {
@@ -219,15 +159,17 @@ export async function loadContinuousAnalysis(opts: {
     const branchAdc = branchAdcByItem.get(itm) || 0;
     const adc = isMain ? branchAdc : c.adc;
 
-    const lb = locBucket(c.locName, c.locType);
-    const agg = txnIndex.get(itm)?.get(lb) || { receipts: 0, issues: 0, patientIssues: 0, transfersIn: 0, transfersOut: 0, returns: 0 };
-    const daysSince = c.latestSnapshot ? daysBetween(c.latestSnapshot, asOf) : 0;
-    const expectedConsumption = isMain ? 0 : adc * daysSince;
+    const agg = c.adjustments;
+    const hasBalance = c.hasBalance && !c.mixedSnapshots && c.ledgerWarnings.length === 0;
+    const daysSince = c.latestSnapshot ? daysBetween(c.latestSnapshot, asOf) + (c.snapshotBoundary === 'start_of_day' ? 1 : 0) : 0;
+    const forecast=forecastForUncoveredDays(adc,daysSince,agg);
+    const expectedConsumption = isMain || !hasBalance || !c.hasConsumption ? 0 : forecast.expected;
     const balances = stockBalances(c.latestBalance, agg.receipts, agg.issues,
-      agg.transfersIn, agg.transfersOut, agg.returns, expectedConsumption, agg.patientIssues);
+      agg.transfersIn, agg.transfersOut, agg.returns, expectedConsumption, forecast.suppressed?agg.patientIssues:0);
     const balance = balances.recorded;
-    const days = c.hasBalance && adc > 0 ? balance / adc : null;
-    const kind: AlertKind = !c.sample.unit || !c.hasBalance || c.mixedSnapshots || (!isMain && !c.hasConsumption) || balance < 0
+    const days = hasBalance && adc > 0 && balance >= 0 ? balance / adc : null;
+    const projectedDays = hasBalance && adc > 0 && balance >= 0 ? balances.projected / adc : null;
+    const kind: AlertKind = !c.sample.unit || !hasBalance || (!isMain && !c.hasConsumption) || balance < 0
       ? "no_data"
       : isMain ? classifyMainDays(days, balance, branchAdc, targetDays)
       : classifyBranchDays(days, balance, issuedAvg, targetDays);
@@ -242,7 +184,7 @@ export async function loadContinuousAnalysis(opts: {
     let why = "الرصيد المسجل مع الحركات يغطي احتياج فترة قياسية.";
     let action = "لا يوجد إجراء عاجل.";
     if (kind === "no_data") {
-      why = !c.hasBalance ? "رصيد غير مسجل؛ لا يعامل كصفر." : c.mixedSnapshots ? "أرصدة بتواريخ مختلفة؛ يلزم التحقق قبل القرار." : "بيانات غير مكتملة للحساب.";
+      why = c.ledgerWarnings.length ? c.ledgerWarnings.join('؛ ') : !c.hasBalance ? "رصيد غير مسجل؛ لا يعامل كصفر." : c.mixedSnapshots ? "أرصدة بتواريخ أو حدود مختلفة؛ يلزم التحقق قبل القرار." : "بيانات غير مكتملة للحساب.";
       action = "راجع البيانات قبل اقتراح شراء أو تحويل.";
     } else if (isMain && balance <= 0 && branchAdc > 0) {
       why = `المخزن الرئيسي غير متوفر لهذا الصنف، بينما متوسط صرف الفروع ${adc.toFixed(1)} وحدة/يوم.`;
@@ -262,6 +204,7 @@ export async function loadContinuousAnalysis(opts: {
 
     }
 
+    if (!hasBalance) confidence = 'weak';
     rows.push({
       key: `${itm}|${c.locType}|${c.locName}`,
       itemKey: itm,
@@ -276,15 +219,21 @@ export async function loadContinuousAnalysis(opts: {
       why, action,
       consumptionPeriods: c.consumptionPeriods,
       snapshotDate: c.latestSnapshot,
-      hasBalance: c.hasBalance,
+      hasBalance,
       hasConsumption: c.hasConsumption,
       mixedSnapshots: c.mixedSnapshots,
       recordedBalance: balance,
-      projectionSuppressed: agg.patientIssues > 0,
+      recordedDays: days,
+      projectedDays,
+      ledgerNet: agg.receipts - agg.issues + agg.transfersIn - agg.transfersOut + agg.returns,
+      ledgerWarnings: c.ledgerWarnings,
+      snapshotBoundary: c.snapshotBoundary,
+      projectionSuppressed: forecast.suppressed,
       snapshotBalance: c.latestBalance,
       projectedBalance: balances.projected,
+      projectedKind: kind === 'no_data' ? 'no_data' : isMain ? classifyMainDays(projectedDays, balances.projected, branchAdc, targetDays) : classifyBranchDays(projectedDays, balances.projected, issuedAvg, targetDays),
       daysSinceSnapshot: daysSince,
-      expectedConsumption,
+      expectedConsumption: balances.estimated,
       receiptsAfter: agg.receipts,
       issuesAfter: agg.issues,
       transfersInAfter: agg.transfersIn,

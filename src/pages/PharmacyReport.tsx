@@ -1,3 +1,5 @@
+import {useAuth as usePermissionsAuth} from '@/hooks/useAuth';
+import {hasPermission} from '../../shared/accessPolicy';
 import PageHeader from "@/components/PageHeader";
 import { Card } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -187,6 +189,9 @@ const PRIORITY_RANK: Record<Bucket, number> = {
 };
 
 export default function PharmacyReport() {
+  const permissionAuth=usePermissionsAuth();
+  const mayReportExport=hasPermission(permissionAuth.roles,permissionAuth.access,'report.export');
+  const mayReportPrint=hasPermission(permissionAuth.roles,permissionAuth.access,'report.print');
   const [target, setTarget] = useState<number>(30);
   const [pharmacy, setPharmacy] = useState<string>("all");
   const [bucketFilter, setBucketFilter] = useState<string>("all");
@@ -413,6 +418,7 @@ export default function PharmacyReport() {
       const safeName = g.pharmacy.replace(/[\\/?*[\]:]/g, " ").slice(0, 28) || "صيدلية";
       XLSX.utils.book_append_sheet(wb, ws, safeName);
     }
+    if(!mayReportExport){window.alert('تصدير التقارير غير مسموح لهذا الحساب');return;}
     XLSX.writeFile(wb, `تقرير_حالة_${pharmacy === "all" ? "كل_الصيدليات" : pharmacy}.xlsx`);
   }
 
@@ -425,6 +431,7 @@ export default function PharmacyReport() {
     );
     const ws = buildStyledSheet(name, sorted);
     XLSX.utils.book_append_sheet(wb, ws, name.replace(/[\\/?*[\]:]/g, " ").slice(0, 28) || "صيدلية");
+    if(!mayReportExport){window.alert('تصدير التقارير غير مسموح لهذا الحساب');return;}
     XLSX.writeFile(wb, `تقرير_${name}.xlsx`);
   }
 
@@ -444,6 +451,7 @@ export default function PharmacyReport() {
       const ws = buildStyledSheet(name, sorted);
       XLSX.utils.book_append_sheet(wb, ws, name.replace(/[\\/?*[\]:]/g, " ").slice(0, 28) || "صيدلية");
     }
+    if(!mayReportExport){window.alert('تصدير التقارير غير مسموح لهذا الحساب');return;}
     XLSX.writeFile(wb, `تقرير_حالة_كل_الصيدليات.xlsx`);
   }
 
@@ -452,6 +460,7 @@ export default function PharmacyReport() {
     const ws = buildStyledSheet("الأصناف الحرجة", critical);
     const wb = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(wb, ws, "الأصناف الحرجة");
+    if(!mayReportExport){window.alert('تصدير التقارير غير مسموح لهذا الحساب');return;}
     XLSX.writeFile(wb, `الأصناف_الحرجة.xlsx`);
   }
 
@@ -563,7 +572,7 @@ export default function PharmacyReport() {
           <Button variant="outline" size="sm" onClick={exportCritical} disabled={noData}>
             <Download className="w-4 h-4" /> تصدير الأصناف الحرجة فقط
           </Button>
-          <Button variant="outline" size="sm" onClick={() => window.print()} disabled={noData}>
+          <Button variant="outline" size="sm" onClick={() => {if(mayReportPrint)window.print();}} disabled={!mayReportPrint || (noData)}>
             <Printer className="w-4 h-4" /> طباعة التقرير
           </Button>
         </div>
@@ -591,7 +600,7 @@ export default function PharmacyReport() {
               <Button variant="outline" size="sm" onClick={() => exportSinglePharmacy(g.pharmacy, g.list)}>
                 <Download className="w-4 h-4" /> تصدير تقرير هذه الصيدلية Excel
               </Button>
-              <Button variant="outline" size="sm" onClick={() => window.print()}>
+              <Button variant="outline" size="sm" disabled={!mayReportPrint} onClick={() => {if(mayReportPrint)window.print();}}>
                 <Printer className="w-4 h-4" /> طباعة التقرير
               </Button>
             </div>

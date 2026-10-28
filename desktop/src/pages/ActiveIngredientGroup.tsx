@@ -1,4 +1,6 @@
 import { useMemo } from "react";
+import {loadContinuousAnalysis} from "@/lib/continuousAnalysis";
+import {currentGroupStock} from "../../../shared/currentGroupStock";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { supabase } from "@/integrations/supabase/client";
@@ -52,47 +54,18 @@ export default function ActiveIngredientGroup() {
   });
 
   const movQ = useQuery({
-    queryKey: ["group-movements", tgk, dictQ.data?.length],
+    queryKey: ['group-current-stock',tgk,dictQ.data],
     enabled: !!dictQ.data?.length,
-    queryFn: async () => {
-      const names = (dictQ.data || []).map((d) => d.original_item_name);
-      const { data, error } = await supabase
-        .from("inventory_movements")
-        .select("id,item_name,scientific_name,trade_name,unit,location_name,location_type,issued_quantity,current_balance,source_sheet,month")
-        .in("item_name", names)
-        .range(0, 49999);
-      if (error) throw error;
-      return (data || []) as Move[];
-    },
+    queryFn: () => loadContinuousAnalysis({groupBy:'sku'}),
   });
 
   const dict = dictQ.data || [];
-  const movements = movQ.data || [];
+  const group=currentGroupStock(movQ.data?.rows||[],dict);
+  const movements=group.selected.map(r=>({id:r.key,item_name:r.itemName,scientific_name:null,trade_name:r.tradeNames?.join("، ")||null,unit:r.unit,location_name:r.locationName,location_type:r.locationType,current_balance:r.hasBalance?r.balance:null,issued_quantity:r.hasConsumption?r.adc*30:null,source_sheet:null,month:r.snapshotDate}));
   const first = dict[0];
   const hasReview = dict.some((d) => d.needs_review && !d.approved);
 
-  const totals = useMemo(() => {
-    const balance = movements.reduce((s, m) => s + num(m.current_balance), 0);
-    const issued = movements.reduce((s, m) => s + num(m.issued_quantity), 0);
-    const adc = issued / 30;
-    const days = adc > 0 ? balance / adc : null;
-    return { balance, issued, adc, days };
-  }, [movements]);
-
-  const perPharmacy = useMemo(() => {
-    const map = new Map<string, { balance: number; issued: number }>();
-    movements.forEach((m) => {
-      const cur = map.get(m.location_name) || { balance: 0, issued: 0 };
-      cur.balance += num(m.current_balance);
-      cur.issued += num(m.issued_quantity);
-      map.set(m.location_name, cur);
-    });
-    return Array.from(map.entries()).map(([name, v]) => {
-      const adc = v.issued / 30;
-      const days = adc > 0 ? v.balance / adc : null;
-      return { name, ...v, adc, days };
-    }).sort((a, b) => a.name.localeCompare(b.name, "ar"));
-  }, [movements]);
+  const totals=group.totals,perPharmacy=group.perPharmacy;
 
   function statusOf(days: number | null) {
     if (days == null) return { label: "بيانات غير كافية", cls: "bg-muted text-muted-foreground" };
@@ -115,8 +88,10 @@ export default function ActiveIngredientGroup() {
     dictQ.refetch();
   }
 
+  if(dictQ.error||movQ.error)return <p role="alert" className="p-6">تعذر حساب رصيد المجموعة من المصادر الحالية. راجع الاتصال والصلاحيات.</p>;
   return (
     <div dir="rtl" className="p-6 space-y-4 max-w-[1400px]">
+      <p className="border p-3">أرصدة حالية للمواقع المتاحة لحسابك، وليست جمعًا لأرصدة الشهور القديمة. المنصرف هنا معياري 30 يومًا وليس إجمالي شهر مختار. لا تجمع تعريفات أو وحدات مختلفة، وراجع اكتمال الصيدليات في مركز التقارير.</p>
       <div className="flex items-center gap-3">
         <Button variant="ghost" size="sm" onClick={() => nav(-1)}><ArrowRight className="w-4 h-4 ml-1" /> رجوع</Button>
         <h1 className="text-xl font-bold">{first?.standard_name || tgk}</h1>
@@ -136,9 +111,9 @@ export default function ActiveIngredientGroup() {
           <div><div className="text-xs text-muted-foreground">الشكل</div><div className="font-semibold">{first?.dosage_form || "—"}</div></div>
           <div><div className="text-xs text-muted-foreground">الوحدة</div><div className="font-semibold">{first?.unit || "—"}</div></div>
           <div><div className="text-xs text-muted-foreground">عدد الأصناف الأصلية</div><div className="font-semibold">{dict.length}</div></div>
-          <div><div className="text-xs text-muted-foreground">إجمالي الرصيد</div><div className="font-semibold">{fmtNum(totals.balance)}</div></div>
-          <div><div className="text-xs text-muted-foreground">إجمالي المنصرف</div><div className="font-semibold">{fmtNum(totals.issued)}</div></div>
-          <div><div className="text-xs text-muted-foreground">متوسط الصرف اليومي</div><div className="font-semibold">{fmtNum(totals.adc, 2)}</div></div>
+          <div><div className="text-xs text-muted-foreground">إجمالي الرصيد</div><div className="font-semibold">{totals.balance==null?'غير مؤكد':fmtNum(totals.balance)}</div></div>
+          <div><div className="text-xs text-muted-foreground">منصرف معياري 30 يومًا</div><div className="font-semibold">{totals.issued==null?'غير مؤكد':fmtNum(totals.issued)}</div></div>
+          <div><div className="text-xs text-muted-foreground">متوسط الصرف اليومي</div><div className="font-semibold">{totals.adc==null?'غير مؤكد':fmtNum(totals.adc, 2)}</div></div>
           <div><div className="text-xs text-muted-foreground">أيام التغطية</div><div className="font-semibold">{totals.days == null ? "—" : `${totals.days.toFixed(0)} يوم`}</div></div>
           <div><div className="text-xs text-muted-foreground">الحالة</div><div><Badge className={st.cls}>{st.label}</Badge></div></div>
         </div>
@@ -202,8 +177,8 @@ export default function ActiveIngredientGroup() {
                 return (
                   <tr key={p.name} className="border-t">
                     <td className="p-2">{p.name}</td>
-                    <td className="p-2">{fmtNum(p.balance)}</td>
-                    <td className="p-2">{fmtNum(p.issued)}</td>
+                    <td className="p-2">{p.balance==null?'غير مؤكد':fmtNum(p.balance)}</td>
+                    <td className="p-2">{p.issued==null?'غير مؤكد':fmtNum(p.issued)}</td>
                     <td className="p-2">{p.days == null ? "—" : `${p.days.toFixed(0)} يوم`}</td>
                     <td className="p-2"><Badge className={s.cls}>{s.label}</Badge></td>
                   </tr>

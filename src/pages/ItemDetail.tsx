@@ -1,4 +1,5 @@
 import { loadContinuousAnalysis } from "@/lib/continuousAnalysis";
+import StockCalculationReview from "../../shared/components/StockCalculationReview";
 import { useParams, Link } from "react-router-dom";
 import PageHeader from "@/components/PageHeader";
 import DataSourceCard from "@/components/DataSourceCard";
@@ -58,6 +59,7 @@ export default function ItemDetail() {
   const mainBalance = mainRows.reduce((s, r) => s + r.balance, 0);
   const branchBalance = branchRows.reduce((s, r) => s + r.balance, 0);
   const hospitalBalance = mainBalance + branchBalance;
+  const balanceLabel = (list: typeof itemRows) => !list.length || list.some(r=>!r.hasBalance) ? 'غير مؤكد' : fmtNum(list.reduce((sum,r)=>sum+r.balance,0));
   const totalIssued = branchRows.reduce((s, r) => s + r.issued, 0);
   const hospitalAdc = branchRows.reduce((sum, row) => sum + row.adc, 0);
   const branchesAdc = branchRows.reduce((s, r) => s + r.adc, 0);
@@ -187,9 +189,9 @@ export default function ItemDetail() {
           <Card className="p-5 mb-4">
             <div className="font-bold mb-3">ملخص سريع</div>
             <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3 text-sm">
-              <Stat label="إجمالي رصيد الصيدليات" value={fmtNum(branchBalance)} />
-              <Stat label="رصيد المخزن الرئيسي" value={fmtNum(mainBalance)} />
-              <Stat label="إجمالي رصيد المستشفى" value={fmtNum(hospitalBalance)} />
+              <Stat label="إجمالي رصيد الصيدليات" value={balanceLabel(branchRows)} />
+              <Stat label="رصيد المخزن الرئيسي" value={balanceLabel(mainRows)} />
+              <Stat label="إجمالي رصيد المستشفى" value={balanceLabel(itemRows)} />
               <Stat label="متوسط الصرف اليومي" value={fmtNum(hospitalAdc, 1)} />
               <Stat label="تغطية المستشفى (يوم)" value={hospitalDays == null ? "—" : fmtNum(hospitalDays)} />
               <Stat label="كود الصنف" value={header.itemCode || "—"} />
@@ -204,6 +206,7 @@ export default function ItemDetail() {
             </div>
           </Card>
 
+          <StockCalculationReview rows={itemRows} />
           {/* 2. جدول الصيدليات */}
           <Card className="p-5 mb-4">
             <div className="font-bold mb-3">تغطية الصنف لكل صيدلية</div>
@@ -228,7 +231,7 @@ export default function ItemDetail() {
                           {r.locationType === "main_warehouse" || r.locationType === "main_store" ? "مخزن رئيسي" : "صيدلية فرعية"}
                         </div>
                       </td>
-                      <td className="p-2">{fmtNum(r.balance)}</td>
+                      <td className="p-2">{r.hasBalance ? fmtNum(r.balance) : 'غير مؤكد'}</td>
                       <td className="p-2">{fmtNum(r.issued)}</td>
                       <td className="p-2">{fmtNum(r.adc, 1)}</td>
                       <td className="p-2 font-semibold">{r.days == null ? "—" : r.days.toFixed(0)}</td>

@@ -20,6 +20,8 @@ function getDbPath() {
 }
 
 function applyMigrations(database) {
+  const userColumns = database.prepare("PRAGMA table_info(users)").all();
+  if (!userColumns.some((column) => column.name === "assigned_location_id")) database.exec("ALTER TABLE users ADD COLUMN assigned_location_id TEXT REFERENCES locations(id)");
   // Columns added after the initial schema — add them if missing.
   const cols = database.prepare("PRAGMA table_info(upload_batches)").all();
   const names = new Set(cols.map((c) => c.name));
@@ -31,6 +33,20 @@ function applyMigrations(database) {
       "ALTER TABLE upload_batches ADD COLUMN batch_kind TEXT NOT NULL DEFAULT 'monthly'"
     );
   }
+  if (!names.has("content_hash")) database.exec("ALTER TABLE upload_batches ADD COLUMN content_hash TEXT");
+  database.exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_batch_content_hash ON upload_batches(content_hash) WHERE content_hash IS NOT NULL");
+  database.exec(fs.readFileSync(path.join(__dirname, "operations.sql"), "utf8"));
+  for (const table of ['upload_batches','branch_reports']) {
+    const existing = new Set(database.prepare('PRAGMA table_info('+table+')').all().map(c=>c.name));
+    for (const name of ['issued_from','issued_to','received_from','received_to','snapshot_boundary']) {
+      if (!existing.has(name)) database.exec('ALTER TABLE '+table+' ADD COLUMN '+name+' TEXT');
+    }
+  }
+  if(!database.prepare('PRAGMA table_info(branch_reports)').all().some(c=>c.name==='consumption_only'))database.exec('ALTER TABLE branch_reports ADD COLUMN consumption_only INTEGER NOT NULL DEFAULT 0');
+  const txnColumns=new Set(database.prepare('PRAGMA table_info(stock_transactions)').all().map(c=>c.name));
+  for(const name of ['issued_from','issued_to'])if(!txnColumns.has(name))database.exec('ALTER TABLE stock_transactions ADD COLUMN '+name+' TEXT');
+  const itemColumns=new Set(database.prepare('PRAGMA table_info(item_master)').all().map(c=>c.name));
+  for(const name of ['first_active_date','ven_class'])if(!itemColumns.has(name))database.exec('ALTER TABLE item_master ADD COLUMN '+name+' TEXT');
 }
 
 function getDb() {
@@ -47,4 +63,5 @@ function getDb() {
   return db;
 }
 
-module.exports = { getDb, getDbPath };
+function closeDb(){if(db?.open)db.close();db=null;}
+module.exports = { getDb, getDbPath, closeDb, applyMigrations };

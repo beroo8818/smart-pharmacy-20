@@ -12,7 +12,7 @@ export default defineConfig({
   test: {
     environment: "jsdom",
     globals: true,
-    server: { deps: { inline: ["react-router", "react-router-dom"] } },
+    server: { deps: { inline: ["react-router", "react-router-dom", "@tanstack/react-query"] } },
     setupFiles: [path.resolve(__dirname, "../src/test/setup.ts")],
     include: ["src/test/**/*.test.tsx"],
   },

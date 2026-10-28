@@ -1,3 +1,5 @@
+import {useAuth as usePermissionsAuth} from '@/hooks/useAuth';
+import {hasPermission} from '../../../shared/accessPolicy';
 import { useEffect, useMemo, useState } from "react";
 import * as XLSX from "xlsx";
 import { api, tokenStore, Movement, UploadBatch } from "@/integrations/desktop/client";
@@ -97,6 +99,9 @@ function buildCompare(rowsA: AnalysisRow[], rowsB: AnalysisRow[]): CompareRow[] 
 }
 
 export default function CompareMonths() {
+  const permissionAuth=usePermissionsAuth();
+  const mayReportExport=hasPermission(permissionAuth.roles,permissionAuth.access,'report.export');
+  const mayReportPrint=hasPermission(permissionAuth.roles,permissionAuth.access,'report.print');
   const [batches, setBatches] = useState<UploadBatch[]>([]);
   const [batchA, setBatchA] = useState("");
   const [batchB, setBatchB] = useState("");
@@ -210,6 +215,7 @@ export default function CompareMonths() {
     const phWs = XLSX.utils.aoa_to_sheet([phHead, ...phRows]);
     phWs["!cols"] = phHead.map(() => ({ wch: 24 }));
     XLSX.utils.book_append_sheet(wb, phWs, "الصيدليات");
+    if(!mayReportExport){window.alert('تصدير التقارير غير مسموح لهذا الحساب');return;}
     XLSX.writeFile(wb, "مقارنة_شهر_بشهر.xlsx");
   }
 

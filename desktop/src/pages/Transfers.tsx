@@ -1,5 +1,6 @@
 import { loadContinuousAnalysis, type ProjectedRow } from "@/lib/continuousAnalysis";
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useMemo, useState } from "react";
+import {useLiveInventory} from '../../../shared/useLiveInventory';
 import { api, tokenStore, Movement, UploadBatch } from "@/integrations/desktop/client";
 import { analyzeMovements, fmtMonth, fmtNum, loadLatestDataset, suggestTransfers, normalize } from "@/lib/desktopAnalytics";
 import ItemIdentity from "@/components/ItemIdentity";
@@ -9,20 +10,11 @@ import { Input } from "@/components/ui/input";
 import { ArrowLeft } from "lucide-react";
 
 export default function Transfers() {
-  const [batch, setBatch] = useState<UploadBatch | null>(null);
-  const [rows, setRows] = useState<ProjectedRow[]>([]);
   const [target, setTarget] = useState(30);
-  const [loading, setLoading] = useState(true);
   const [q, setQ] = useState("");
-
-  useEffect(() => {
-    (async () => {
-      const d = await loadContinuousAnalysis({ targetDays: target, groupBy: "sku" });
-      setBatch(d.latestBatch);
-      setRows(d.rows);
-      setLoading(false);
-    })();
-  }, [target]);
+  const loader=useCallback(()=>loadContinuousAnalysis({targetDays:target,groupBy:'sku'}),[target]);
+  const {data,loading,error}=useLiveInventory(loader);
+  const batch=data?.latestBatch||null,rows=data?.rows||[];
 
   const transfers = useMemo(
     () => suggestTransfers(rows, target),
@@ -38,6 +30,7 @@ export default function Transfers() {
   }, [transfers, q]);
 
   const noData = !loading && !batch;
+  if(error)return <p role="alert" className="p-6">تعذر تحديث التحويلات المقترحة: {error}. راجع البيانات قبل التنفيذ.</p>;
 
   return (
     <div className="p-8 max-w-[1600px]">

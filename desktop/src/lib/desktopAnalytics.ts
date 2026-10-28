@@ -1,5 +1,5 @@
 import { planTransfers } from "../../../shared/transferPlan";
-import { locationKey, monthDays, numericValue } from "../../../shared/inventoryHistory";
+import { locationKey, monthDays, numericValue, movementPeriodDays } from "../../../shared/inventoryHistory";
 
 import type { Movement, UploadBatch } from "@/integrations/desktop/client";
 
@@ -110,10 +110,12 @@ function extractActiveName(active?: string | null, item?: string | null, trade?:
 export function itemKeyFromParts(parts: {
   item_name_ar?: string | null; item_name_en?: string | null; item_code?: string | null;
   active_ingredient_ar?: string | null; strength?: string | null; dosage_form?: string | null; unit?: string | null;
+  therapeutic_group_key?:string|null;
 }) {
   const active = extractActiveName(parts.active_ingredient_ar, parts.item_name_ar, parts.item_name_en);
   const strength = parts.strength || extractStrengthText(parts.active_ingredient_ar, parts.item_name_ar, parts.item_name_en);
   const form = parts.dosage_form || extractFormText(parts.active_ingredient_ar, parts.item_name_ar, parts.item_name_en, parts.unit);
+  if(parts.therapeutic_group_key)return `ai::${[parts.therapeutic_group_key,strength,form,parts.unit].map(normalize).join('|')}`;
   if (active && strength) return `ai::${[active, strength, form, parts.unit || ""].map(normalize).join("|")}`;
   return normalize(parts.item_code || `${parts.item_name_ar || ""}|${parts.active_ingredient_ar || ""}|${parts.unit || ""}`);
 }
@@ -124,6 +126,8 @@ export function itemKeyAliases(r: Movement) {
     r.item_name_ar,
     r.active_ingredient_ar,
     r.item_name_en,
+    itemKeyFromParts({...r,therapeutic_group_key:null}),
+    r.therapeutic_group_key?`ai::${normalize(r.therapeutic_group_key)}|${normalize(r.unit)}`:null,
     `${r.item_name_ar || ""}|${r.active_ingredient_ar || ""}|${r.item_name_en || ""}|${r.unit || ""}`,
   ];
   return Array.from(new Set(values.map(normalize).filter(Boolean)));
@@ -224,7 +228,8 @@ export function analyzeMovements(movements: Movement[], targetDays = 30): Analys
     const balance = num(m.closing_balance);
     const hasBalance = numericValue(m.closing_balance) != null;
     const hasIssued = numericValue(m.issued_qty) != null;
-    const daily = issued / (monthDays(m.month) || 30);
+    const duration=movementPeriodDays(m);
+    const daily = duration>0 ? issued/duration : 0;
     const names = itemTradeNames(m);
     if (!cur) groups.set(key, { sample: m, balance, issued, adc: daily, hasBalance, hasIssued, tradeNames: new Set(names) });
     else {

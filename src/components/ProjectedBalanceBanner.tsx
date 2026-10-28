@@ -1,6 +1,7 @@
 import { Card } from "@/components/ui/card";
 import { AlertTriangle, CalendarClock, Activity, ShieldCheck } from "lucide-react";
 import type { ContinuousDataset } from "@/lib/continuousAnalysis";
+import { todayISO } from "../../shared/inventoryHistory";
 import { CONFIDENCE_CLASS, CONFIDENCE_LABEL, type Confidence } from "@/lib/continuousAnalysis";
 import { fmtNum } from "@/lib/format";
 
@@ -20,16 +21,10 @@ export default function ProjectedBalanceBanner({
   dataset,
 }: { dataset: ContinuousDataset | undefined | null }) {
   if (!dataset || !dataset.latestBatch) return null;
-  const b = dataset.latestBatch;
-  const dates = dataset.rows.map((row) => row.snapshotDate).filter(Boolean).sort();
-  const snapshotDate = dates[0] || b.snapshot_date || b.month || null;
-  const today = new Date().toISOString().substring(0, 10);
-  const daysSince = snapshotDate
-    ? Math.max(0, Math.floor((new Date(today).getTime() - new Date(snapshotDate).getTime()) / 86_400_000))
-    : 0;
-
-  const snapshotTotal = dataset.rows.reduce((a, r) => a + (r.snapshotBalance || 0), 0);
-  const projectedTotal = dataset.rows.reduce((a, r) => a + (r.projectedBalance || 0), 0);
+  const dates = dataset.rows.filter(r=>r.hasBalance).map(r=>r.snapshotDate).filter(Boolean).sort();
+  const snapshotDate = dates[0] || null;
+  const today = todayISO();
+  const daysSince = snapshotDate ? Math.max(0,Math.floor((Date.parse(today)-Date.parse(snapshotDate))/86400000)) : 0;
   const conf = dominantConfidence(dataset.rows);
   const stale = daysSince > 7;
 

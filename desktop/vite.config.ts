@@ -5,7 +5,7 @@ import path from "path";
 export default defineConfig({
   base: "./",
   server: { host: "127.0.0.1", port: 5180, strictPort: true },
-  resolve: { alias: { "@": path.resolve(__dirname, "src") } },
+  resolve: { dedupe: ["react", "react-dom", "@tanstack/react-query"], alias: { "@": path.resolve(__dirname, "src") } },
   plugins: [react()],
   define: {
     "import.meta.env.VITE_SUPABASE_URL": JSON.stringify(process.env.VITE_SUPABASE_URL || "http://127.0.0.1:54321"),

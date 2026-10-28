@@ -4,6 +4,7 @@
 // لا تعتمد على إخفاء الأزرار فقط — استدعِ هذه الدوال قبل أي إجراء حسّاس.
 // ============================================================================
 
+import {accessPage,type AccessProfile} from '../../shared/accessPolicy';
 export type Role =
   | "system_admin"
   | "pharmacy_manager"
@@ -93,11 +94,11 @@ export function canViewLocation(
   targetLocationId: string | null | undefined,
 ): boolean {
   if (has(roles, "system_admin", "pharmacy_manager", "warehouse_keeper")) return true;
-  if (has(roles, "viewer")) return true; // مشاهد عام (قراءة فقط) ما لم يكن أيضًا صيدلي فرعي
   if (has(roles, "sub_pharmacist")) {
     if (!assignedLocationId) return false;
     return assignedLocationId === targetLocationId;
   }
+  if (has(roles, "viewer")) return true;
   return false;
 }
 
@@ -112,6 +113,8 @@ export const isLocationRestricted = (roles: Role[]) =>
 // ---------------------------------------------------------------------------
 
 export const PAGE_ROLES: Record<string, Role[]> = {
+  "/branch-access": ["system_admin", "pharmacy_manager"],
+  "/permissions": ["system_admin", "pharmacy_manager"],
   "/settings": ["system_admin"],
   "/backup": ["system_admin"],
   "/data-sources": ["system_admin", "pharmacy_manager", "warehouse_keeper"],
@@ -130,7 +133,9 @@ export const PAGE_ROLES: Record<string, Role[]> = {
 };
 
 /** هل يستطيع المستخدم الوصول لصفحة بمسارها؟ */
-export function canAccessPage(roles: Role[], path: string): boolean {
+export function canAccessPage(roles: Role[], path: string, access?:AccessProfile|null): boolean {
+  if(access?.configured)return accessPage(roles,path,access);
+  if (isLocationRestricted(roles)) return ["/home", "/my-pharmacy", "/report-center", "/workflows", "/account","/data-freshness"].includes(path);
   // طابق أطول مفتاح يبدأ به المسار (لدعم المسارات المتداخلة).
   const key = Object.keys(PAGE_ROLES)
     .filter((p) => path === p || path.startsWith(p + "/"))
@@ -140,4 +145,4 @@ export function canAccessPage(roles: Role[], path: string): boolean {
 }
 
 /** التنقّل الجانبي: هل يُعرض هذا المسار لهذا الدور؟ */
-export const canSeeNav = (roles: Role[], path: string) => canAccessPage(roles, path);
+export const canSeeNav = (roles: Role[], path: string,access?:AccessProfile|null) => canAccessPage(roles, path,access);

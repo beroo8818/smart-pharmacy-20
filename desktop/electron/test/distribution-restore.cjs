@@ -1,0 +1,57 @@
+const assert=require('node:assert/strict'),fs=require('fs'),os=require('os'),path=require('path'),Module=require('module'),crypto=require('crypto');
+const root=fs.mkdtempSync(path.join(process.env.DAWA_TEST_ROOT||os.tmpdir(),'dawa-restore-test-'));
+let active=path.join(root,'current');
+const oldLoad=Module._load;
+Module._load=function(id,...args){if(id==='electron')return {app:{getPath:()=>active},dialog:{}};return oldLoad.call(this,id,...args);};
+const sqlite=require('../db/sqlite.cjs'),restore=require('../db/restore.cjs'),Database=require('better-sqlite3');
+let checks=0;const ok=x=>{assert.equal(x,true);checks++;};
+function create(dir,value){
+ active=dir;fs.mkdirSync(dir,{recursive:true});const db=sqlite.getDb();
+ db.prepare("INSERT INTO users(id,username,password_hash,role) VALUES('admin','test-admin',?,'system_admin')").run('salt:'+crypto.randomBytes(64).toString('hex'));
+ db.prepare("INSERT INTO settings(key,value) VALUES('restore_test',?)").run(value);
+ db.prepare("INSERT INTO user_sessions(token,user_id,expires_at) VALUES('old-token','admin','2099-01-01')").run();
+ db.prepare("INSERT INTO upload_batches(id,file_name,month,status,uploaded_by) VALUES('restore-batch','training.xlsx','2026-09-01','saved','admin')").run();
+ db.prepare("INSERT INTO recommendation_actions(id,upload_batch_id,recommendation_key,recommendation_type,to_location,status,acted_by,acted_at,client_id,note) VALUES('decision','restore-batch','key','review_data','Branch A','postponed','admin','2026-09-01T00:00:00Z','request',?)").run(value);
+ return db;
+}
+async function main(){
+ const current=path.join(root,'current'),incoming=path.join(root,'incoming');
+ let db=create(current,'current-data');await db.backup(path.join(root,'original.db'));sqlite.closeDb();
+ db=create(incoming,'incoming-data');sqlite.closeDb();active=current;
+ const source=path.join(incoming,'dawa.db');
+ fs.writeFileSync(path.join(root,'bad.db'),'not a database');
+ await assert.rejects(()=>restore.prepareRestore(path.join(root,'bad.db'),current));checks++;
+ await assert.rejects(()=>restore.prepareRestore(path.join(current,'dawa.db'),current));checks++;
+ db=sqlite.getDb();
+ const prepared=await restore.prepareRestore(source,current);ok(prepared.restartRequired);
+ ok(db.prepare("SELECT value FROM settings WHERE key='restore_test'").get().value==='current-data');
+ db.prepare("UPDATE settings SET value='latest-before-close' WHERE key='restore_test'").run();
+ db.prepare("UPDATE recommendation_actions SET note='latest-before-close'").run();
+ await assert.rejects(()=>restore.prepareRestore(source,current));checks++;
+ sqlite.closeDb();
+ const result=await restore.applyPendingRestore(current);ok(result.applied);ok(fs.existsSync(result.safety));
+ const safety=new Database(result.safety,{readonly:true});ok(safety.prepare("SELECT value FROM settings WHERE key='restore_test'").get().value==='latest-before-close');ok(safety.prepare('SELECT note FROM recommendation_actions').get().note==='latest-before-close');safety.close();
+ const restored=new Database(path.join(current,'dawa.db'),{readonly:true});ok(restored.prepare("SELECT value FROM settings WHERE key='restore_test'").get().value==='incoming-data');ok(restored.prepare('SELECT count(*) n FROM user_sessions').get().n===0);ok(restored.pragma('quick_check',{simple:true})==='ok');ok(restored.prepare('SELECT note FROM recommendation_actions').get().note==='incoming-data');restored.close();
+ const originalSource=new Database(source,{readonly:true});ok(originalSource.prepare('SELECT count(*) n FROM user_sessions').get().n===1);originalSource.close();
+ ok(!(await restore.applyPendingRestore(current)).applied);
+ await restore.prepareRestore(source,current);
+ const manifest=JSON.parse(fs.readFileSync(path.join(current,'pending-restore.json'),'utf8'));
+ fs.appendFileSync(path.join(current,manifest.staged),'tampered');
+ await assert.rejects(()=>restore.applyPendingRestore(current),/تغير/);checks++;
+ const untouched=new Database(path.join(current,'dawa.db'),{readonly:true});ok(untouched.prepare("SELECT value FROM settings WHERE key='restore_test'").get().value==='incoming-data');untouched.close();
+ const traversal=path.join(root,'traversal');fs.mkdirSync(traversal);
+ fs.writeFileSync(path.join(traversal,'pending-restore.json'),JSON.stringify({version:1,staged:'../restore-staged-evil.db',sha256:'bad'}));
+ await assert.rejects(()=>restore.applyPendingRestore(traversal),/غير صالح/);checks++;
+ const restart=path.join(root,'interrupted');fs.mkdirSync(restart);
+ fs.copyFileSync(source,path.join(restart,'dawa.db'));
+ const finalHash=crypto.createHash('sha256').update(fs.readFileSync(path.join(restart,'dawa.db'))).digest('hex');
+ fs.writeFileSync(path.join(restart,'pending-restore.json'),JSON.stringify({version:1,staged:'restore-staged-consumed.db',sha256:finalHash}));
+ ok((await restore.applyPendingRestore(restart)).recovered);ok(!fs.existsSync(path.join(restart,'pending-restore.json')));
+ const {configureRuntime}=require('../runtime.cjs');
+ const moved=path.join(root,'moved portable folder');let dataDir=null,sessionDir=null;
+ const app={isPackaged:true,getPath:key=>key==='exe'?path.join(moved,'Dawa.exe'):path.join(root,'appdata'),setPath:(key,val)=>{if(key==='userData')dataDir=val;if(key==='sessionData')sessionDir=val;},setAppUserModelId:()=>{}};
+ const portable=configureRuntime(app,{PORTABLE_EXECUTABLE_DIR:moved});ok(portable.portable);ok(dataDir===path.join(moved,'DawaData'));ok(fs.existsSync(sessionDir));
+ const installed=configureRuntime(app,{});ok(!installed.portable);ok(dataDir===path.join(root,'appdata','Dawa'));
+ console.log(JSON.stringify({checks,isolated:true,originalHospitalDataUntouched:true,root}));
+}
+main().catch(e=>{console.error(e);process.exit(1);});

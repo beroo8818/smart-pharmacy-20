@@ -19,7 +19,8 @@ function insert({ token, action, entity, entity_id, details }) {
 }
 
 function list({ token, limit }) {
-  requireAuth(token);
+  const user = requireAuth(token);
+  if (!["system_admin", "pharmacy_manager"].includes(user.role)) return { ok: false, rows: [], error: "صلاحيات غير كافية" };
   const db = getDb();
   const lim = Math.min(Number(limit) || 500, 2000);
   const rows = db.prepare("SELECT * FROM audit_log ORDER BY at DESC LIMIT ?").all(lim);

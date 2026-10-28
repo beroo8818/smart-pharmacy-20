@@ -1,4 +1,5 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useMemo, useState } from "react";
+import {useLiveInventory} from '../../../shared/useLiveInventory';
 import { Link } from "react-router-dom";
 import { type UploadBatch } from "@/integrations/desktop/client";
 import { fmtMonth, fmtNum, isMainLocation, normalize } from "@/lib/desktopAnalytics";
@@ -27,21 +28,11 @@ function StatCard({ label, value, tone = "default" }: { label: string; value: st
 }
 
 export default function Dashboard() {
-  const [batch, setBatch] = useState<UploadBatch | null>(null);
-  const [rows, setRows] = useState<ProjectedRow[]>([]);
-  const [monthsCount, setMonthsCount] = useState(0);
-  const [preliminary, setPreliminary] = useState(false);
   const [monthsWindow, setMonthsWindow] = useState(3);
-  const [loading, setLoading] = useState(true);
   const target = 30;
-
-  useEffect(() => { (async () => {
-    setLoading(true);
-    const d = await loadContinuousAnalysis({ monthsWindow, targetDays: target });
-    setBatch(d.latestBatch); setRows(d.rows);
-    setMonthsCount(d.monthsCount); setPreliminary(d.preliminary);
-    setLoading(false);
-  })(); }, [monthsWindow]);
+  const loader=useCallback(()=>loadContinuousAnalysis({monthsWindow,targetDays:target}),[monthsWindow]);
+  const {data,loading,error}=useLiveInventory(loader);
+  const batch=data?.latestBatch||null, rows=data?.rows||[], monthsCount=data?.monthsCount||0, preliminary=data?.preliminary||false;
 
   const branchRows = rows.filter((r) => !isMainLocation(r.locationType));
   const mainRows = rows.filter((r) => isMainLocation(r.locationType));
@@ -73,6 +64,7 @@ export default function Dashboard() {
     return Array.from(m.values()).sort((a, b) => b.shortage - a.shortage);
   }, [branchRows]);
 
+  if(error)return <p role="alert" className="p-6">تعذر تحديث الحسابات: {error}. لا تستخدم العرض السابق كرصيد حالي.</p>;
   return (
     <div className="p-8 max-w-[1400px]">
       <header className="mb-6">

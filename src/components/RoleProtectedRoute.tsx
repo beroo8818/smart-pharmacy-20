@@ -1,7 +1,7 @@
 import { ReactNode } from "react";
 import { Navigate } from "react-router-dom";
 import { useAuth } from "@/hooks/useAuth";
-import { canAccessPage } from "@/lib/permissions";
+import { canAccessPage, isLocationRestricted } from "@/lib/permissions";
 import { ShieldAlert } from "lucide-react";
 import ForcePasswordChange from "@/components/ForcePasswordChange";
 
@@ -17,7 +17,7 @@ export default function RoleProtectedRoute({
   path: string;
   children: ReactNode;
 }) {
-  const { session, loading, roles, mustChangePassword } = useAuth();
+  const { session, loading, roles, mustChangePassword,access } = useAuth();
 
   if (loading)
     return (
@@ -30,8 +30,9 @@ export default function RoleProtectedRoute({
 
   // بوابة إجبارية قبل أي صفحة: تغيير كلمة المرور الافتراضية.
   if (mustChangePassword) return <ForcePasswordChange />;
+  if (path === "/home" && !access?.configured&&isLocationRestricted(roles)) return <Navigate to="/my-pharmacy" replace />;
 
-  if (!canAccessPage(roles, path)) {
+  if (!canAccessPage(roles, path,access)) {
     return (
       <div className="min-h-screen flex flex-col items-center justify-center gap-4 p-8 text-center">
         <ShieldAlert className="w-12 h-12 text-destructive" />

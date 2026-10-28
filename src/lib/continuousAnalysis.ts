@@ -1,5 +1,6 @@
 import { fetchPagedRows } from "./pagedQuery";
-import { buildInventoryHistory, locationKey, stockBalances, todayISO, type ConsumptionPeriod } from "../../shared/inventoryHistory";
+import { buildInventoryHistory, locationKey, stockBalances, todayISO, movementPeriodDays, type ConsumptionPeriod } from "../../shared/inventoryHistory";
+import { applyStockLedger,forecastForUncoveredDays } from "../../shared/stockLedger";
 import { supabase } from "@/integrations/supabase/client";
 import {
   type AnalysisRow,
@@ -62,6 +63,7 @@ export type StockTxn = {
   note: string | null;
   created_by: string;
   created_at: string;
+  issued_from?:string|null;issued_to?:string|null;
 };
 
 export const TXN_LABEL: Record<StockTxn["txn_type"], string> = {
@@ -80,9 +82,15 @@ export type ProjectedRow = AnalysisRow & {
   hasConsumption: boolean;
   mixedSnapshots: boolean;
   recordedBalance: number;
+  recordedDays: number | null;
+  projectedDays: number | null;
+  ledgerNet: number;
+  ledgerWarnings: string[];
+  snapshotBoundary: string | null;
   projectionSuppressed: boolean;
   snapshotBalance: number;
   projectedBalance: number;
+  projectedKind: AlertKind;
   daysSinceSnapshot: number;
   expectedConsumption: number;
   receiptsAfter: number;
@@ -102,7 +110,7 @@ export type ProjectedRow = AnalysisRow & {
 
 export async function fetchRecentBatches(months = 6): Promise<BatchWithSnapshot[]> {
   const data = await fetchPagedRows<BatchWithSnapshot>(() => (supabase as any)
-    .from("upload_batches").select("id,file_name,month,rows_saved,status,created_at,snapshot_date,batch_kind")
+    .from("upload_batches").select("id,file_name,month,rows_saved,status,created_at,snapshot_date,batch_kind,issued_from,issued_to,received_from,received_to,snapshot_boundary")
     .eq("status", "saved").order("created_at", { ascending: false }).order("id", { ascending: false }));
   return sortBatchesForAnalysis(data);
 }
@@ -128,23 +136,19 @@ export async function fetchMovementsForBatches(batchIds: string[]): Promise<Move
   for (let start = 0; start < batchIds.length; start += 50) {
     data.push(...await fetchPagedRows<Movement>(() => (supabase as any)
       .from("inventory_movements")
-      .select("id,upload_batch_id,month,item_name,item_code,scientific_name,trade_name,unit,location_name,location_type,issued_quantity,current_balance")
+      .select("id,upload_batch_id,month,item_name,item_code,scientific_name,trade_name,unit,location_name,location_type,issued_quantity,current_balance,upload_batches(issued_from,issued_to)")
       .in("upload_batch_id", batchIds.slice(start, start + 50)).order("id", { ascending: true })));
   }
   const dict = await fetchActiveIngredientDictionary();
-  return enrichMovementsWithDictionary(data, dict);
+  return enrichMovementsWithDictionary(data.map((m:any)=>({...m,issued_from:m.upload_batches?.issued_from,issued_to:m.upload_batches?.issued_to})), dict);
 }
 
 export async function fetchStockTransactions(sinceISO?: string): Promise<StockTxn[]> {
-  let q: any = (supabase as any)
-    .from("stock_transactions")
-    .select("*")
-    .order("txn_date", { ascending: false })
-    .range(0, 9999);
-  if (sinceISO) q = q.gte("txn_date", sinceISO);
-  const { data, error } = await q;
-  if (error) throw error;
-  return (data || []) as StockTxn[];
+  return fetchPagedRows<StockTxn>(() => {
+    let query = (supabase as any).from('stock_transactions').select('*').order('txn_date',{ascending:false}).order('id',{ascending:true});
+    if(sinceISO) query=query.gte('txn_date',sinceISO);
+    return query;
+  });
 }
 
 function daysBetween(fromISO: string, toISO: string): number {
@@ -201,107 +205,12 @@ export async function loadContinuousAnalysis(opts: {
     itemTradeNames(movement).forEach((name) => names.add(name));
     namesByCell.set(key, names);
   }
-  const cells = new Map(history.map((cell, index) => [index, {
-    ...cell, tradeNames: namesByCell.get(`${historyItemKey(cell.sample)}|${locationKey(cell.locName, cell.locType)}`) || new Set<string>(),
-  }]));
-
-  const earliest = Array.from(cells.values()).reduce((acc, c) => (c.latestSnapshot < acc ? c.latestSnapshot : acc), asOf);
+  const earliest = history.filter(c=>c.hasBalance).reduce((acc,c)=>c.latestSnapshot<acc?c.latestSnapshot:acc,asOf);
   const txns = await fetchStockTransactions(earliest);
-
-  // Index transactions by item_key + location name
-  function locBucket(name: string | null, type: string | null) {
-    return locationKey(name, type);
-  }
-  const snapshotIndex = new Map<string, { snapshot: string; uploadedAt: string; mixed: boolean; unit: string | null }>();
-  const itemAliasToCanonical = new Map<string, string>();
-  const ambiguousAliases = new Set<string>();
-  for (const c of cells.values()) {
-    const canonical = historyItemKey(c.sample);
-    snapshotIndex.set(`${canonical}|${locBucket(c.locName, c.locType)}`, {
-      mixed: c.mixedSnapshots,
-      unit: c.sample.unit,
-      snapshot: c.latestSnapshot,
-      uploadedAt: c.latestUploadedAt,
-    });
-    for (const alias of itemKeyAliases(c.sample)) {
-      const prior = itemAliasToCanonical.get(alias);
-      if (prior && prior !== canonical) ambiguousAliases.add(alias);
-      else itemAliasToCanonical.set(alias, canonical);
-    }
-  }
-
-  for (const movement of movements) {
-    const canonical = historyItemKey(movement);
-    for (const alias of itemKeyAliases(movement)) {
-      const prior = itemAliasToCanonical.get(alias);
-      if (prior && prior !== canonical) ambiguousAliases.add(alias);
-      else itemAliasToCanonical.set(alias, canonical);
-    }
-  }
-
-  type TxnAgg = {
-    receipts: number; issues: number; patientIssues: number; transfersIn: number; transfersOut: number; returns: number;
-  };
-  const txnIndex = new Map<string, Map<string, TxnAgg>>(); // itemKey -> locBucket -> agg
-  function ensureAgg(itemK: string, loc: string): TxnAgg {
-    let m = txnIndex.get(itemK);
-    if (!m) { m = new Map(); txnIndex.set(itemK, m); }
-    let a = m.get(loc);
-    if (!a) { a = { receipts: 0, issues: 0, patientIssues: 0, transfersIn: 0, transfersOut: 0, returns: 0 }; m.set(loc, a); }
-    return a;
-  }
-  function shouldApplyTxn(itemK: string, loc: string, t: StockTxn): boolean {
-    const ref = snapshotIndex.get(`${itemK}|${loc}`);
-    if (!ref || ref.mixed || (t.unit && normalize(t.unit) !== normalize(ref.unit))) return false;
-    if (t.txn_date > ref.snapshot) return true;
-    if (t.txn_date < ref.snapshot) return false;
-    if (!t.created_at || !ref.uploadedAt) return false;
-    return new Date(t.created_at).getTime() > new Date(ref.uploadedAt).getTime();
-  }
-  function applyTxn(itemK: string, loc: string, t: StockTxn, field: keyof TxnAgg, q: number) {
-    if (shouldApplyTxn(itemK, loc, t)) ensureAgg(itemK, loc)[field] += q;
-  }
-  function canonicalTxnKey(t: StockTxn): string {
-    const raw = normalize(t.item_code || t.item_key || t.item_name);
-    return ambiguousAliases.has(raw) ? "" : itemAliasToCanonical.get(raw) || raw;
-  }
-  for (const t of txns) {
-    if (t.txn_date > asOf) continue;
-    const q = num(t.qty);
-    if (q <= 0) continue;
-    const itm = canonicalTxnKey(t);
-    switch (t.txn_type) {
-      case "warehouse_receipt": {
-        const loc = locBucket(t.to_location_name, t.to_location_type || "main_warehouse");
-        applyTxn(itm, loc, t, "receipts", q);
-        break;
-      }
-      case "warehouse_issue_to_pharmacy": {
-        const fromLoc = locBucket(t.from_location_name, t.from_location_type || "main_warehouse");
-        const toLoc = locBucket(t.to_location_name, t.to_location_type || "sub_pharmacy");
-        applyTxn(itm, fromLoc, t, "issues", q);
-        applyTxn(itm, toLoc, t, "receipts", q);
-        break;
-      }
-      case "pharmacy_issue": {
-        const loc = locBucket(t.from_location_name, t.from_location_type || "sub_pharmacy");
-        applyTxn(itm, loc, t, "issues", q);
-        applyTxn(itm, loc, t, "patientIssues", q);
-        break;
-      }
-      case "pharmacy_transfer": {
-        applyTxn(itm, locBucket(t.from_location_name, t.from_location_type || "sub_pharmacy"), t, "transfersOut", q);
-        applyTxn(itm, locBucket(t.to_location_name, t.to_location_type || "sub_pharmacy"), t, "transfersIn", q);
-        break;
-      }
-      case "warehouse_return":
-      case "pharmacy_return_to_warehouse": {
-        applyTxn(itm, locBucket(t.from_location_name, t.from_location_type || "sub_pharmacy"), t, "issues", q);
-        applyTxn(itm, locBucket(t.to_location_name, t.to_location_type || "main_warehouse"), t, "receipts", q);
-        break;
-      }
-    }
-  }
+  const ledger = applyStockLedger(history,txns,asOf,historyItemKey,itemKeyAliases,normalize,movements);
+  const cells = new Map(ledger.map((cell,index)=>[index,{
+    ...cell, tradeNames:namesByCell.get(`${historyItemKey(cell.sample)}|${locationKey(cell.locName,cell.locType)}`) || new Set(itemTradeNames(cell.sample)),
+  }]));
 
   const branchAdcByItem = new Map<string, number>();
   for (const c of cells.values()) {
@@ -322,15 +231,17 @@ export async function loadContinuousAnalysis(opts: {
     const branchAdc = branchAdcByItem.get(itm) || 0;
     const adc = isMain ? branchAdc : c.adc;
 
-    const lb = locBucket(c.locName, c.locType);
-    const agg = txnIndex.get(itm)?.get(lb) || { receipts: 0, issues: 0, patientIssues: 0, transfersIn: 0, transfersOut: 0, returns: 0 };
-    const daysSince = c.latestSnapshot ? daysBetween(c.latestSnapshot, asOf) : 0;
-    const expectedConsumption = isMain ? 0 : adc * daysSince;
+    const agg = c.adjustments;
+    const hasBalance = c.hasBalance && !c.mixedSnapshots && c.ledgerWarnings.length === 0;
+    const daysSince = c.latestSnapshot ? daysBetween(c.latestSnapshot, asOf) + (c.snapshotBoundary === 'start_of_day' ? 1 : 0) : 0;
+    const forecast=forecastForUncoveredDays(adc,daysSince,agg);
+    const expectedConsumption = isMain || !hasBalance || !c.hasConsumption ? 0 : forecast.expected;
     const balances = stockBalances(c.latestBalance, agg.receipts, agg.issues,
-      agg.transfersIn, agg.transfersOut, agg.returns, expectedConsumption, agg.patientIssues);
+      agg.transfersIn, agg.transfersOut, agg.returns, expectedConsumption, forecast.suppressed?agg.patientIssues:0);
     const balance = balances.recorded;
-    const days = c.hasBalance && adc > 0 ? balance / adc : null;
-    const kind: AlertKind = !c.sample.unit || !c.hasBalance || c.mixedSnapshots || (!isMain && !c.hasConsumption) || balance < 0
+    const days = hasBalance && adc > 0 && balance >= 0 ? balance / adc : null;
+    const projectedDays = hasBalance && adc > 0 && balance >= 0 ? balances.projected / adc : null;
+    const kind: AlertKind = !c.sample.unit || !hasBalance || (!isMain && !c.hasConsumption) || balance < 0
       ? "no_data"
       : isMain ? classifyMainDays(days, balance, branchAdc, targetDays)
       : classifyBranchDays(days, balance, issuedAvg, targetDays);
@@ -355,7 +266,7 @@ export async function loadContinuousAnalysis(opts: {
     let why = "الرصيد المسجل مع الحركات يغطي احتياج فترة قياسية.";
     let action = "لا يوجد إجراء عاجل.";
     if (kind === "no_data") {
-      why = !c.hasBalance ? "رصيد غير مسجل؛ لا يعامل كصفر." : c.mixedSnapshots ? "أرصدة بتواريخ مختلفة؛ يلزم التحقق قبل القرار." : "بيانات غير مكتملة للحساب.";
+      why = c.ledgerWarnings.length ? c.ledgerWarnings.join('؛ ') : !c.hasBalance ? "رصيد غير مسجل؛ لا يعامل كصفر." : c.mixedSnapshots ? "أرصدة بتواريخ أو حدود مختلفة؛ يلزم التحقق قبل القرار." : "بيانات غير مكتملة للحساب.";
       action = "راجع البيانات قبل اقتراح شراء أو تحويل.";
     } else if (isMain && balance <= 0 && branchAdc > 0) {
       why = `المخزن الرئيسي غير متوفر لهذا الصنف، بينما متوسط صرف الفروع ${adc.toFixed(1)} وحدة/يوم.`;
@@ -375,6 +286,7 @@ export async function loadContinuousAnalysis(opts: {
 
     }
 
+    if (!hasBalance) confidence = 'weak';
     rows.push({
       key: `${itm}|${c.locType}|${c.locName}`,
       itemKey: itm,
@@ -394,15 +306,21 @@ export async function loadContinuousAnalysis(opts: {
       action,
       consumptionPeriods: c.consumptionPeriods,
       snapshotDate: c.latestSnapshot,
-      hasBalance: c.hasBalance,
+      hasBalance,
       hasConsumption: c.hasConsumption,
       mixedSnapshots: c.mixedSnapshots,
       recordedBalance: balance,
-      projectionSuppressed: agg.patientIssues > 0,
+      recordedDays: days,
+      projectedDays,
+      ledgerNet: agg.receipts - agg.issues + agg.transfersIn - agg.transfersOut + agg.returns,
+      ledgerWarnings: c.ledgerWarnings,
+      snapshotBoundary: c.snapshotBoundary,
+      projectionSuppressed: forecast.suppressed,
       snapshotBalance: c.latestBalance,
       projectedBalance: balances.projected,
+      projectedKind: kind === 'no_data' ? 'no_data' : isMain ? classifyMainDays(projectedDays, balances.projected, branchAdc, targetDays) : classifyBranchDays(projectedDays, balances.projected, issuedAvg, targetDays),
       daysSinceSnapshot: daysSince,
-      expectedConsumption,
+      expectedConsumption: balances.estimated,
       receiptsAfter: agg.receipts,
       issuesAfter: agg.issues,
       transfersInAfter: agg.transfersIn,
@@ -436,21 +354,22 @@ export async function loadContinuousAnalysis(opts: {
 /** Month-over-month comparison between two batches. */
 export async function compareMonths(batchAId: string, batchBId: string, targetDays = 30) {
   const movements = await fetchMovementsForBatches([batchAId, batchBId]);
-  type Agg = { issuedA: number; balanceA: number; issuedB: number; balanceB: number; sample: Movement; locName: string; locType: string };
+  type Agg = { issuedA: number; balanceA: number; issuedB: number; balanceB: number; adcA:number;adcB:number; sample: Movement; locName: string; locType: string };
   const map = new Map<string, Agg>();
   for (const m of movements) {
     const key = `${itemKey(m)}|${normalize(m.location_type)}|${normalize(m.location_name)}`;
     let a = map.get(key);
     if (!a) {
-      a = { issuedA: 0, balanceA: 0, issuedB: 0, balanceB: 0, sample: m, locName: m.location_name, locType: m.location_type };
+      a = { issuedA: 0, balanceA: 0, issuedB: 0, balanceB: 0, adcA:0,adcB:0, sample: m, locName: m.location_name, locType: m.location_type };
       map.set(key, a);
     }
-    if (m.upload_batch_id === batchAId) { a.issuedA += num(m.issued_quantity); a.balanceA = num(m.current_balance); }
-    else { a.issuedB += num(m.issued_quantity); a.balanceB = num(m.current_balance); }
+    const days=movementPeriodDays(m),daily=days>0?num(m.issued_quantity)/days:0;
+    if (m.upload_batch_id === batchAId) { a.issuedA += num(m.issued_quantity); a.balanceA = num(m.current_balance);a.adcA+=daily; }
+    else { a.issuedB += num(m.issued_quantity); a.balanceB = num(m.current_balance);a.adcB+=daily; }
   }
 
   const items = Array.from(map.values()).map((a) => {
-    const adcA = a.issuedA / 30, adcB = a.issuedB / 30;
+    const adcA = a.adcA, adcB = a.adcB;
     const daysA = adcA > 0 ? a.balanceA / adcA : null;
     const daysB = adcB > 0 ? a.balanceB / adcB : null;
     const becameRisky =

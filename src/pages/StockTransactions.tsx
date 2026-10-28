@@ -12,6 +12,9 @@ import { fetchStockTransactions, TXN_LABEL, type StockTxn } from "@/lib/continuo
 import { itemKeyFromParts, normalize, num } from "@/lib/batchAnalysis";
 import { logAudit } from "@/lib/audit";
 import { canRegisterStockTx } from "@/lib/permissions";
+import {notifyInventoryChanged} from '../../shared/inventoryRefresh';
+import ActualIssuePeriod from '../../shared/components/ActualIssuePeriod';
+import {hasPermission,stockPermission} from '../../shared/accessPolicy';
 
 type TxnType = StockTxn["txn_type"];
 
@@ -25,9 +28,9 @@ const TYPES: { value: TxnType; label: string; needs: { from: boolean; to: boolea
 ];
 
 export default function StockTransactions() {
-  const { user, roles } = useAuth();
+  const { user, roles,access } = useAuth();
   const navigate = useNavigate();
-  const canWrite = roles.some((r) => ["system_admin", "pharmacy_manager", "warehouse_keeper", "sub_pharmacist"].includes(r));
+  const canWrite = ['stock.receipt','stock.issue','stock.transfer','stock.return'].some(key=>hasPermission(roles,access,key));
 
   const [rows, setRows] = useState<StockTxn[]>([]);
   const [loading, setLoading] = useState(true);
@@ -35,6 +38,7 @@ export default function StockTransactions() {
 
   // Form
   const [txnType, setTxnType] = useState<TxnType>("warehouse_receipt");
+  const [issueFrom,setIssueFrom]=useState(''),[issueTo,setIssueTo]=useState('');
   const [date, setDate] = useState<string>(new Date().toISOString().substring(0, 10));
   const [itemName, setItemName] = useState("");
   const [itemCode, setItemCode] = useState("");
@@ -50,6 +54,8 @@ export default function StockTransactions() {
   const [lastSaved, setLastSaved] = useState<string | null>(null);
 
   const cfg = TYPES.find((t) => t.value === txnType)!;
+  const availableTypes=TYPES.filter(t=>hasPermission(roles,access,stockPermission[t.value]));
+  useEffect(()=>{if(!hasPermission(roles,access,stockPermission[txnType])&&availableTypes.length)setTxnType(availableTypes[0].value);},[roles,access,txnType]);
 
   async function reload() {
     setLoading(true);
@@ -64,7 +70,8 @@ export default function StockTransactions() {
 
   async function save() {
     if (!user) { toast.error("يجب تسجيل الدخول"); return; }
-    if (!canRegisterStockTx(roles)) { toast.error("غير مسموح: تسجيل حركات المخزن غير متاح لدورك."); return; }
+    const key={warehouse_receipt:'stock.receipt',pharmacy_issue:'stock.issue',warehouse_issue_to_pharmacy:'stock.transfer',pharmacy_transfer:'stock.transfer',warehouse_return:'stock.return',pharmacy_return_to_warehouse:'stock.return'}[txnType];
+    if (!hasPermission(roles,access,key)) { toast.error("غير مسموح بتسجيل هذا النوع من الحركات."); return; }
     if (!activeIngredient.trim()) { toast.error("اكتب المادة الفعالة"); return; }
     if (!strength.trim()) { toast.error("اكتب التركيز"); return; }
     const q = num(qty);
@@ -85,6 +92,7 @@ export default function StockTransactions() {
     try {
       const displayName = itemName.trim() || [activeIngredient.trim(), strength.trim(), dosageForm.trim()].filter(Boolean).join(" ");
       const payload = {
+        issued_from:txnType==='pharmacy_issue'?issueFrom||null:null,issued_to:txnType==='pharmacy_issue'?issueTo||null:null,
         txn_date: date,
         txn_type: txnType,
         item_key: itemKeyFromParts({
@@ -108,6 +116,7 @@ export default function StockTransactions() {
       };
       const { error } = await (supabase as any).from("stock_transactions").insert(payload);
       if (error) throw error;
+      notifyInventoryChanged();
       await logAudit({
         userId: user.id,
         action: "stock_transaction_created",
@@ -115,6 +124,7 @@ export default function StockTransactions() {
         newValue: payload,
       });
       toast.success("تم حفظ الحركة");
+      setIssueFrom('');setIssueTo('');
       setLastSaved(`${TXN_LABEL[txnType]} — ${displayName} (${q})`);
       setItemName(""); setItemCode(""); setActiveIngredient(""); setStrength(""); setDosageForm(""); setUnit(""); setFromName(""); setToName(""); setQty(""); setNote("");
       reload();
@@ -144,12 +154,13 @@ export default function StockTransactions() {
 
       {canWrite && (
         <Card className="p-5 space-y-3">
+          {txnType==='pharmacy_issue'&&<ActualIssuePeriod from={issueFrom} to={issueTo} onChange={(from,to)=>{setIssueFrom(from);setIssueTo(to);}}/>}
           <div className="font-bold">إضافة حركة</div>
           <div className="grid grid-cols-1 md:grid-cols-3 gap-3 text-sm">
             <label className="flex flex-col gap-1">
               <span>نوع الحركة</span>
               <select value={txnType} onChange={(e) => setTxnType(e.target.value as TxnType)} className="border rounded-md px-2 py-2 bg-background">
-                {TYPES.map((t) => <option key={t.value} value={t.value}>{t.label}</option>)}
+                {availableTypes.map((t) => <option key={t.value} value={t.value}>{t.label}</option>)}
               </select>
             </label>
             <label className="flex flex-col gap-1">
@@ -250,7 +261,7 @@ export default function StockTransactions() {
               <tbody>
                 {filtered.map((r) => (
                   <tr key={r.id} className="border-t">
-                    <td className="p-2 whitespace-nowrap">{r.txn_date}</td>
+                    <td className="p-2 whitespace-nowrap">{r.txn_date}{r.txn_type==='pharmacy_issue'&&<div className="text-xs">{r.issued_from&&r.issued_to?`يغطي ${r.issued_from} إلى ${r.issued_to}`:'أيام المنصرف غير معروفة'}</div>}</td>
                     <td className="p-2">{r.item_name || r.item_code || "—"}</td>
                     <td className="p-2">{r.from_location_name || "—"}</td>
                     <td className="p-2">{r.to_location_name || "—"}</td>

@@ -1,3 +1,5 @@
+import {useAuth as usePermissionsAuth} from '@/hooks/useAuth';
+import {hasPermission} from '../../shared/accessPolicy';
 import PageHeader from "@/components/PageHeader";
 import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -171,6 +173,9 @@ function buildCompare(rowsA: AnalysisRow[], rowsB: AnalysisRow[]): CompareRow[] 
 }
 
 export default function CompareMonths() {
+  const permissionAuth=usePermissionsAuth();
+  const mayReportExport=hasPermission(permissionAuth.roles,permissionAuth.access,'report.export');
+  const mayReportPrint=hasPermission(permissionAuth.roles,permissionAuth.access,'report.print');
   const { data: batches = [], isLoading: loadingBatches } = useQuery({
     queryKey: ["compare-batches"],
     queryFn: async () => {
@@ -361,6 +366,7 @@ export default function CompareMonths() {
     phWs["!rtl"] = true as any;
     XLSX.utils.book_append_sheet(wb, phWs, "الصيدليات");
 
+    if(!mayReportExport){window.alert('تصدير التقارير غير مسموح لهذا الحساب');return;}
     XLSX.writeFile(wb, "مقارنة_شهر_بشهر.xlsx");
   }
 

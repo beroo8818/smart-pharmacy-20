@@ -49,7 +49,9 @@ function login({ username, password }) {
       id: user.id,
       username: user.username,
       full_name: user.full_name,
-      role: user.role,
+      role: user.assigned_location_id ? "sub_pharmacist" : user.role,
+      assigned_location_id: user.assigned_location_id || null,
+      access:require('./rights.cjs').profile(user),
     },
   };
 }
@@ -82,7 +84,9 @@ function getCurrentUser({ token }) {
       id: user.id,
       username: user.username,
       full_name: user.full_name,
-      role: user.role,
+      role: user.assigned_location_id ? "sub_pharmacist" : user.role,
+      assigned_location_id: user.assigned_location_id || null,
+      access:require('./rights.cjs').profile(user),
     },
   };
 }
@@ -96,7 +100,7 @@ function requireAuth(token) {
 function changePassword({ token, currentPassword, newPassword }) {
   let user;
   try { user = requireAuth(token); } catch (e) { return { ok: false, error: e.message }; }
-  if (!newPassword || String(newPassword).length < 4) {
+  if (!newPassword || String(newPassword).length < 8) {
     return { ok: false, error: "كلمة المرور الجديدة قصيرة جدًا" };
   }
   const db = getDb();
@@ -108,6 +112,7 @@ function changePassword({ token, currentPassword, newPassword }) {
     hashPassword(newPassword),
     user.id
   );
+  db.prepare("DELETE FROM user_sessions WHERE user_id = ? AND token <> ?").run(user.id, token);
   return { ok: true };
 }
 
@@ -138,6 +143,7 @@ function createUser({ token, username, fullName, password, role }) {
   db.prepare(
     "INSERT INTO users(id, username, full_name, password_hash, role) VALUES (?, ?, ?, ?, ?)"
   ).run(id, String(username).trim(), fullName || null, hashPassword(password), role);
+  if(role!=='system_admin')db.prepare('INSERT INTO user_access_profiles(user_id,permissions,location_ids,all_branches,updated_by) VALUES(?,?,?,0,?)').run(id,JSON.stringify(require('./rights.cjs').defaults('sub_pharmacist')),'[]',admin.id);
   return { ok: true, id };
 }
 

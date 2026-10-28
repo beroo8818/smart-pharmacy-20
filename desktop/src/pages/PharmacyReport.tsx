@@ -1,3 +1,5 @@
+import {useAuth as usePermissionsAuth} from '@/hooks/useAuth';
+import {hasPermission} from '../../../shared/accessPolicy';
 import { useEffect, useMemo, useState } from "react";
 import * as XLSX from "xlsx";
 import { api, tokenStore, Movement, UploadBatch } from "@/integrations/desktop/client";
@@ -11,6 +13,9 @@ const PRIORITY: Record<AlertKind, number> = {
 const SUMMARY_KINDS: AlertKind[] = ["critical", "danger", "below", "safe", "over", "deadstock"];
 
 export default function PharmacyReport() {
+  const permissionAuth=usePermissionsAuth();
+  const mayReportExport=hasPermission(permissionAuth.roles,permissionAuth.access,'report.export');
+  const mayReportPrint=hasPermission(permissionAuth.roles,permissionAuth.access,'report.print');
   const [batch, setBatch] = useState<UploadBatch | null>(null);
   const [movements, setMovements] = useState<Movement[]>([]);
   const [loading, setLoading] = useState(true);
@@ -114,6 +119,7 @@ export default function PharmacyReport() {
       const ws = styleSheet(XLSX.utils.json_to_sheet(toSheet(list)));
       XLSX.utils.book_append_sheet(wb, ws, g.pharmacy.replace(/[\\/?*[\]:]/g, " ").slice(0, 28) || "صيدلية");
     }
+    if(!mayReportExport){window.alert('تصدير التقارير غير مسموح لهذا الحساب');return;}
     XLSX.writeFile(wb, `تقرير_حالة_${pharmacy === "all" ? "كل_الصيدليات" : pharmacy}.xlsx`);
   }
   function exportSingle(name: string, list: AnalysisRow[]) {
@@ -122,6 +128,7 @@ export default function PharmacyReport() {
     const wb = XLSX.utils.book_new();
     wb.Workbook = { Views: [{ RTL: true } as any] };
     XLSX.utils.book_append_sheet(wb, ws, name.replace(/[\\/?*[\]:]/g, " ").slice(0, 28) || "صيدلية");
+    if(!mayReportExport){window.alert('تصدير التقارير غير مسموح لهذا الحساب');return;}
     XLSX.writeFile(wb, `تقرير_${name}.xlsx`);
   }
   function exportCritical() {
@@ -130,6 +137,7 @@ export default function PharmacyReport() {
     const wb = XLSX.utils.book_new();
     wb.Workbook = { Views: [{ RTL: true } as any] };
     XLSX.utils.book_append_sheet(wb, ws, "الأصناف الحرجة");
+    if(!mayReportExport){window.alert('تصدير التقارير غير مسموح لهذا الحساب');return;}
     XLSX.writeFile(wb, `الأصناف_الحرجة.xlsx`);
   }
 
@@ -164,7 +172,7 @@ export default function PharmacyReport() {
         <div className="flex flex-wrap gap-2">
           <button className="btn-outline" disabled={!grouped.length} onClick={exportAll}>📥 تصدير Excel</button>
           <button className="btn-outline" disabled={!rows.length} onClick={exportCritical}>📥 تصدير الأصناف الحرجة فقط</button>
-          <button className="btn-outline" disabled={!grouped.length} onClick={() => window.print()}>🖨️ طباعة التقرير</button>
+          <button className="btn-outline" disabled={!mayReportPrint || (!grouped.length)} onClick={() => {if(mayReportPrint)window.print();}}>🖨️ طباعة التقرير</button>
         </div>
       </section>
 
@@ -183,7 +191,7 @@ export default function PharmacyReport() {
             <h2 className="text-xl font-bold" dir="auto">{g.pharmacy}</h2>
             <div className="flex flex-wrap gap-2 no-print">
               <button className="btn-outline text-xs" onClick={() => exportSingle(g.pharmacy, list)}>📥 تصدير تقرير هذه الصيدلية Excel</button>
-              <button className="btn-outline text-xs" onClick={() => window.print()}>🖨️ طباعة التقرير</button>
+              <button className="btn-outline text-xs" disabled={!mayReportPrint} onClick={() => {if(mayReportPrint)window.print();}}>🖨️ طباعة التقرير</button>
             </div>
           </div>
 

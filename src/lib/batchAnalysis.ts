@@ -1,4 +1,4 @@
-import { locationKey, monthDays, numericValue } from "../../shared/inventoryHistory";
+import { locationKey, monthDays, numericValue, movementPeriodDays } from "../../shared/inventoryHistory";
 import { supabase } from "@/integrations/supabase/client";
 import {
   buildStandardName,
@@ -41,6 +41,8 @@ export type UploadBatch = {
   id: string; file_name: string; month: string;
   rows_saved: number; status: string; created_at: string;
   snapshot_date?: string | null; batch_kind?: string | null;
+  snapshot_boundary?: string | null;
+  issued_from?: string | null; issued_to?: string | null;
 };
 
 export type Movement = {
@@ -50,6 +52,7 @@ export type Movement = {
   strength?: string | null; dosage_form?: string | null; therapeutic_group_key?: string | null;
   location_name: string; location_type: string;
   issued_quantity: number | string | null; current_balance: number | string | null;
+  issued_from?: string | null; issued_to?: string | null;
 };
 
 export type AnalysisRow = {
@@ -97,10 +100,10 @@ type ItemKeyParts = {
 };
 
 export function itemKeyFromParts(parts: ItemKeyParts) {
-  if (parts.therapeutic_group_key) return `ai::${normalize(parts.therapeutic_group_key)}|${normalize(parts.unit)}`;
   const active = extractActiveIngredient(parts.scientific_name, parts.item_name, parts.trade_name);
   const strength = parts.strength || extractStrength(parts.scientific_name, parts.item_name, parts.trade_name);
   const dosage = parts.dosage_form || extractDosageForm(parts.scientific_name, parts.item_name, parts.trade_name, parts.unit);
+  if (parts.therapeutic_group_key) return `ai::${[parts.therapeutic_group_key,strength,dosage,parts.unit].map(normalize).join('|')}`;
   if (active && strength) {
     return `ai::${[active, strength, dosage || "", parts.unit || ""].map(normalize).join("|")}`;
   }
@@ -113,6 +116,8 @@ export function itemKeyAliases(r: Movement) {
     r.item_name,
     r.scientific_name,
     r.trade_name,
+    itemKeyFromParts({...r,therapeutic_group_key:null}),
+    r.therapeutic_group_key?`ai::${normalize(r.therapeutic_group_key)}|${normalize(r.unit)}`:null,
     `${r.item_name || ""}|${r.scientific_name || ""}|${r.trade_name || ""}|${r.unit || ""}`,
   ];
   return Array.from(new Set(values.map(normalize).filter(Boolean)));
@@ -167,6 +172,7 @@ export async function fetchActiveIngredientDictionary() {
   const { data, error } = await (supabase as any)
     .from("active_ingredient_dictionary")
     .select("original_item_name,scientific_name,trade_name,active_ingredient,strength,dosage_form,unit,standard_name,therapeutic_group_key")
+    .eq('approved',true)
     .range(0, 99999);
   if (error) return new Map<string, DictEntry>();
   const map = new Map<string, DictEntry>();
@@ -226,7 +232,8 @@ export function analyzeMovements(movements: Movement[], targetDays = 30): Analys
     const balance = num(m.current_balance);
     const hasBalance = numericValue(m.current_balance) != null;
     const hasIssued = numericValue(m.issued_quantity) != null;
-    const daily = issued / (monthDays(m.month) || 30);
+    const duration=movementPeriodDays(m);
+    const daily = duration>0 ? issued/duration : 0;
     const names = itemTradeNames(m);
     if (!cur) groups.set(key, { sample: m, balance, issued, adc: daily, hasBalance, hasIssued, tradeNames: new Set(names) });
     else {
@@ -300,7 +307,7 @@ export async function fetchLatestBatch(): Promise<UploadBatch | null> {
 export async function fetchSavedBatches(limit = 200): Promise<UploadBatch[]> {
   const { data, error } = await (supabase as any)
     .from("upload_batches")
-    .select("id,file_name,month,rows_saved,status,created_at,snapshot_date,batch_kind")
+    .select("id,file_name,month,rows_saved,status,created_at,snapshot_date,batch_kind,issued_from,issued_to")
     .eq("status", "saved")
     .order("created_at", { ascending: false })
     .limit(limit);
@@ -311,10 +318,10 @@ export async function fetchSavedBatches(limit = 200): Promise<UploadBatch[]> {
 export async function fetchMovementsByBatch(batchId: string): Promise<Movement[]> {
   const { data, error } = await (supabase as any)
     .from("inventory_movements")
-    .select("id,upload_batch_id,month,item_name,item_code,scientific_name,trade_name,unit,location_name,location_type,issued_quantity,current_balance")
+    .select("id,upload_batch_id,month,item_name,item_code,scientific_name,trade_name,unit,location_name,location_type,issued_quantity,current_balance,upload_batches(issued_from,issued_to)")
     .eq("upload_batch_id", batchId)
     .range(0, 49999);
   if (error) throw error;
   const dict = await fetchActiveIngredientDictionary();
-  return enrichMovementsWithDictionary((data || []) as Movement[], dict);
+  return enrichMovementsWithDictionary((data || []).map((row:any)=>({...row,issued_from:row.upload_batches?.issued_from,issued_to:row.upload_batches?.issued_to})) as Movement[], dict);
 }

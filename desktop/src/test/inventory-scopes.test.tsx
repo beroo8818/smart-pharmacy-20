@@ -1,9 +1,11 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import {notifyInventoryChanged} from '../../../shared/inventoryRefresh';
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import Items from "@/pages/Items";
 import { fmtNum } from "@/lib/desktopAnalytics";
 
 const fixture = vi.hoisted(() => ({ rows: [] as any[] }));
+afterEach(()=>{cleanup();vi.restoreAllMocks();});
 vi.mock("react-router-dom", () => ({
   useSearchParams: () => [new URLSearchParams(), vi.fn()],
   Link: ({ children, to }: any) => <a href={to}>{children}</a>,
@@ -45,5 +47,14 @@ describe("desktop item totals", () => {
     render(<Items />);
     await screen.findByRole("cell", { name: fmtNum(250) });
     expect(screen.getByRole("option", { name: "pharmacy 25" })).toBeTruthy();
+  });
+  it('refreshes an already open desktop screen after a successful inventory write',async()=>{
+    vi.spyOn(document,'visibilityState','get').mockReturnValue('visible');
+    render(<Items/>);
+    await screen.findByRole('cell',{name:fmtNum(100)});
+    fixture.rows=fixture.rows.map((value,index)=>index===0?{...value,balance:50}:value);
+    notifyInventoryChanged();
+    await screen.findByRole('cell',{name:fmtNum(90)});
+    expect(screen.queryByRole('cell',{name:fmtNum(100)})).toBeNull();
   });
 });

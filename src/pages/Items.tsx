@@ -1,4 +1,5 @@
 import { buildInventoryHistory, locationKey, todayISO } from "../../shared/inventoryHistory";
+import { applyStockLedger } from "../../shared/stockLedger";
 import PageHeader from "@/components/PageHeader";
 import { Card } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -10,8 +11,8 @@ import { useSearchParams } from "react-router-dom";
 import { Button } from "@/components/ui/button";
 import { ChevronDown, ChevronUp, AlertTriangle } from "lucide-react";
 import ItemIdentity from "@/components/ItemIdentity";
-import { itemDisplayName, itemKey as analysisItemKey, itemTradeNames, sortBatchesForAnalysis } from "@/lib/batchAnalysis";
-import { fetchMovementsForBatches, fetchRecentBatches } from "@/lib/continuousAnalysis";
+import { itemDisplayName, itemKey as analysisItemKey, itemKeyAliases, itemTradeNames, sortBatchesForAnalysis } from "@/lib/batchAnalysis";
+import { fetchMovementsForBatches, fetchRecentBatches, fetchStockTransactions } from "@/lib/continuousAnalysis";
 
 function DetailsBlock({ title, items, calc, why }: { title: string; items: [string, string][]; calc: string; why: string }) {
   return (
@@ -285,11 +286,16 @@ export default function Items() {
   });
 
   const movements = useMemo(() => movementsQuery.data || [], [movementsQuery.data]);
+  const transactionsQuery = useQuery({
+    queryKey:['item-stock-ledger',batches.map(b=>b.id).join('|')],
+    enabled:dataMode==='latest'&&!batchFromUrl&&batches.length>0,
+    queryFn:()=>fetchStockTransactions(batches.reduce((date,b)=>(b.snapshot_date||b.month)<date?(b.snapshot_date||b.month):date,todayISO())),
+  });
 
   const sourceText = useMemo(() => {
     if (!movements.length) return null;
     if (dataMode === "latest" && selectedBatch) {
-      if (!batchFromUrl) return "آخر رصيد مسجل لكل صنف وموقع، ومتوسط منصرف آخر 3 أشهر مكتملة. الأرصدة ليست جردًا موحدًا إذا اختلفت تواريخ التحديث.";
+      if (!batchFromUrl) return "آخر رصيد مسجل مع الحركات اللاحقة، ومتوسط المنصرف وفق أيام الفترات المسجلة. الأرصدة ليست جردًا موحدًا إذا اختلفت تواريخ التحديث أو كانت بياناتها ناقصة.";
       return `مصدر التحليل: ملف ${selectedBatch.file_name}، شهر ${fmtMonth(selectedBatch.month)}، عدد الصفوف ${fmtNum(selectedBatch.rows_saved)}`;
     }
     if (dataMode === "month") {
@@ -299,14 +305,33 @@ export default function Items() {
     return `مصدر التحليل: كل الملفات المحفوظة، عدد الملفات ${fmtNum(new Set(movements.map((m) => m.upload_batch_id)).size)}، عدد الصفوف ${fmtNum(movements.length)}`;
   }, [dataMode, effectiveMonth, movements, selectedBatch]);
 
+  const perItemLoc = useMemo(() => {
+    const history = buildInventoryHistory(batches, movements.map((m) => ({
+      sample: m, batchId: m.upload_batch_id, item: itemKey(m) || rawItemKey(m),
+      sku: [m.item_code, m.trade_name, m.item_name, m.unit].map(normalize).join("|"),
+      locationName: m.location_name, locationType: m.location_type,
+      balance: m.current_balance, issued: m.issued_quantity,
+    })), dataMode === "all" ? 1200 : 3, todayISO());
+    const out = new Map<string, { balance: number; amc: number; snapshot: string; valid: boolean; knownBalance: boolean; loc: { id: string; name: string; type: string }; sample: InventoryMovement }>();
+    const ledger=applyStockLedger(history,dataMode==='latest'&&!batchFromUrl?transactionsQuery.data||[]:[],todayISO(),m=>itemKey(m)||rawItemKey(m),m=>itemKeyAliases(m as any),normalize,movements);
+    const ledgerReady = dataMode!=='latest'||!!batchFromUrl||(!transactionsQuery.isPending&&!transactionsQuery.isError);
+    for (const value of ledger) {
+      const key = `${itemKey(value.sample)}|${locationKey(value.locName, value.locType)}`;
+      out.set(key, { balance: value.latestBalance + value.adjustments.receipts - value.adjustments.issues + value.adjustments.transfersIn - value.adjustments.transfersOut + value.adjustments.returns, amc: value.issuedAverage,
+        snapshot: value.latestSnapshot+'|'+(value.snapshotBoundary||'unknown'), knownBalance: ledgerReady && value.hasBalance && !value.mixedSnapshots && !value.ledgerWarnings.length, valid: ledgerReady && value.hasBalance && value.hasConsumption && !value.mixedSnapshots && !value.ledgerWarnings.length,
+        loc: { id: locationKey(value.locName, value.locType), name: value.locName, type: value.locType }, sample: value.sample });
+    }
+    return out;
+  }, [movements, batches, dataMode, analysisMode, dictMap, includeUnreviewed, transactionsQuery.data, transactionsQuery.isPending, transactionsQuery.isError, batchFromUrl]);
+
   const locations = useMemo(() => {
     const map = new Map<string, { id: string; name: string; type: string }>();
-    for (const m of movements) {
-      const key = locationKey(m.location_name, m.location_type);
-      if (!map.has(key)) map.set(key, { id: key, name: m.location_name, type: m.location_type });
+    for (const value of perItemLoc.values()) {
+      const site=value.loc;
+      if(!map.has(site.id)) map.set(site.id,site);
     }
     return Array.from(map.values()).sort((a, b) => a.name.localeCompare(b.name, "ar"));
-  }, [movements]);
+  }, [perItemLoc]);
 
   const branches = useMemo(() => locations.filter((l) => !isMainLocation(l.type)), [locations]);
   const mainStores = useMemo(() => locations.filter((l) => isMainLocation(l.type)), [locations]);
@@ -320,23 +345,6 @@ export default function Items() {
     }
     return Array.from(labels);
   }, [mainStores]);
-
-  const perItemLoc = useMemo(() => {
-    const history = buildInventoryHistory(batches, movements.map((m) => ({
-      sample: m, batchId: m.upload_batch_id, item: itemKey(m) || rawItemKey(m),
-      sku: [m.item_code, m.trade_name, m.item_name, m.unit].map(normalize).join("|"),
-      locationName: m.location_name, locationType: m.location_type,
-      balance: m.current_balance, issued: m.issued_quantity,
-    })), dataMode === "all" ? 1200 : 3, todayISO());
-    const out = new Map<string, { balance: number; amc: number; snapshot: string; valid: boolean; knownBalance: boolean; loc: { id: string; name: string; type: string }; sample: InventoryMovement }>();
-    for (const value of history) {
-      const key = `${itemKey(value.sample)}|${locationKey(value.locName, value.locType)}`;
-      out.set(key, { balance: value.latestBalance, amc: value.issuedAverage,
-        snapshot: value.latestSnapshot, knownBalance: value.hasBalance, valid: value.hasBalance && value.hasConsumption && !value.mixedSnapshots,
-        loc: { id: locationKey(value.locName, value.locType), name: value.locName, type: value.locType }, sample: value.sample });
-    }
-    return out;
-  }, [movements, batches, dataMode, analysisMode, dictMap, includeUnreviewed]);
 
   const rows = useMemo(() => {
     const itemSamples = new Map<string, { sample: InventoryMovement; aliasCount: number; reviewCount: number; tradeNames: Set<string> }>();
@@ -367,7 +375,7 @@ export default function Items() {
         let brBalancesKnown = true;
         let mainBalancesKnown = true;
         const snapshotDates = new Set<string>();
-        const perBranch: Array<{ loc: { id: string; name: string; type: string }; balance: number; amc: number; adc: number; days: number | null; bucket: CoverageBucket }> = [];
+        const perBranch: Array<{ loc: { id: string; name: string; type: string }; balance: number; knownBalance:boolean; amc: number; adc: number; days: number | null; bucket: CoverageBucket }> = [];
 
         for (const b of branches) {
           const v = perItemLoc.get(`${key}|${locationKey(b.name, b.type)}`);
@@ -378,8 +386,8 @@ export default function Items() {
           snapshotDates.add(v.snapshot);
           brAmc += v.amc;
           const adc = v.amc / 30;
-          const days = adc > 0 ? v.balance / adc : null;
-          perBranch.push({ loc: b, balance: v.balance, amc: v.amc, adc, days, bucket: v.valid ? bucketize(days, target, v.balance, adc) : "no_data" });
+          const days = v.valid && adc > 0 ? v.balance / adc : null;
+          perBranch.push({ loc: b, balance: v.balance, knownBalance:v.knownBalance, amc: v.amc, adc, days, bucket: v.valid ? bucketize(days, target, v.balance, adc) : "no_data" });
         }
 
         const brAdc = brAmc / 30;
@@ -420,10 +428,10 @@ export default function Items() {
           mainBalance,
           mainPresent,
           mainDays,
-          mainBucket: hasMain ? bucketize(mainDays, target, mainBalance, brAdc, false) : null,
+          mainBucket: hasMain ? !mainBalancesKnown||!complete||snapshotDates.size>1?'no_data' as CoverageBucket:bucketize(mainDays, target, mainBalance, brAdc, false) : null,
           hospitalBalance,
           hospitalDays,
-          hospitalBucket: hasMain ? bucketize(hospitalDays, target, hospitalBalance, brAdc, false) : null,
+          hospitalBucket: hasMain ? !mainBalancesKnown||!complete||snapshotDates.size>1?'no_data' as CoverageBucket:bucketize(hospitalDays, target, hospitalBalance, brAdc, false) : null,
           perBranch,
         };
       })
@@ -451,7 +459,7 @@ export default function Items() {
       const b = r.perBranch.find((x) => x.loc.id === bid);
       if (!b) return "—";
       if (b.bucket === "deadstock") return "صنف راكد — راجع جدوى الاحتفاظ به.";
-      if (b.bucket === "no_data") return "لا يوجد رصيد ولا صرف — بيانات غير كافية.";
+      if (b.bucket === "no_data") return "الرصيد أو المنصرف غير مؤكد؛ راجع البيانات والحركات.";
       if (b.days != null && b.days < target) {
         if (r.mainPresent && r.mainDays != null && r.mainDays >= target) return `اصرف من المخزن الرئيسي إلى ${b.loc.name}.`;
         const donor = r.perBranch.find((x) => x.loc.id !== bid && x.days != null && x.days > target * 2);
@@ -479,14 +487,16 @@ export default function Items() {
       const bid = scope.slice("branch:".length);
       const b = r.perBranch.find((x) => x.loc.id === bid);
       if (!b) return "—";
+      if (b.bucket==='no_data') return 'الرصيد أو المنصرف غير مؤكد؛ القيم الغائبة ليست صفرًا.';
       if (b.adc <= 0) return b.balance > 0 ? `لا يوجد صرف من هذا الصنف في ${b.loc.name} رغم وجود رصيد ${fmtNum(b.balance)} وحدة.` : `لا يوجد رصيد ولا صرف من هذا الصنف في ${b.loc.name}.`;
       return `هذا الصنف يغطي ${b.days!.toFixed(0)} يوم في ${b.loc.name}، لأن الرصيد الحالي ${fmtNum(b.balance)} وحدة ومتوسط الصرف اليومي ${fmtNum(b.adc, 1)} وحدة.`;
     }
+    if (r.brBucket==='no_data') return 'الرصيد أو المنصرف غير مؤكد؛ راجع تواريخ الأرصدة والحركات.';
     if (r.brAdc <= 0) return r.brBalance > 0 ? `لا يوجد صرف على مستوى الصيدليات الفرعية رغم وجود رصيد ${(r.brBalancesKnown ? fmtNum(r.brBalance) : "غير مكتمل")} وحدة.` : "لا يوجد رصيد ولا صرف على مستوى الصيدليات الفرعية.";
     return `الصيدليات الفرعية تغطي ${r.brDays!.toFixed(0)} يوم: رصيد ${(r.brBalancesKnown ? fmtNum(r.brBalance) : "غير مكتمل")} ÷ متوسط الصرف اليومي ${fmtNum(r.brAdc, 1)}.`;
   }
 
-  const loading = batchesQuery.isLoading || movementsQuery.isLoading;
+  const loading = batchesQuery.isLoading || movementsQuery.isLoading || transactionsQuery.isLoading;
   const showBranchCol = scope.startsWith("branch:");
   const noSavedData = !loading && batches.length === 0;
   const selectedMonthValue = effectiveMonth || "";
@@ -509,6 +519,7 @@ export default function Items() {
         title="تحليل المواد العلاجية"
         description="حساب أيام التغطية من البيانات المحفوظة فعليًا بعد رفع ملفات Excel."
       />
+      {transactionsQuery.isError&&<p role="alert" className="p-3 border rounded">تعذر قراءة الحركات؛ لا تعتمد الأرصدة الحالية قبل إعادة المحاولة.</p>}
 
       <Card className="p-5 mb-4">
         <div className="grid gap-3 md:grid-cols-6">
@@ -671,7 +682,7 @@ export default function Items() {
                           )}
                         </td>
                         <td className="p-2 text-xs text-muted-foreground align-top whitespace-normal break-words" dir="auto">{b.loc.name}</td>
-                        {detailed && <td className="p-2 align-top whitespace-nowrap">{fmtNum(b.balance)}</td>}
+                        {detailed && <td className="p-2 align-top whitespace-nowrap">{b.knownBalance?fmtNum(b.balance):'غير مؤكد'}</td>}
                         {detailed && <td className="p-2 align-top whitespace-nowrap">{fmtNum(b.amc, 1)}</td>}
                         {detailed && <td className="p-2 align-top whitespace-nowrap">{fmtNum(b.adc, 2)}</td>}
                         <td className="p-2 align-top whitespace-nowrap font-semibold">{b.days == null ? "—" : `${b.days.toFixed(0)} يوم`}</td>
@@ -694,7 +705,7 @@ export default function Items() {
                           <td colSpan={20} className="p-4 text-xs">
                             <DetailsBlock title={`تفاصيل: ${r.itemName} — ${b.loc.name}`}
                               items={[
-                                ["رصيد الصيدلية", fmtNum(b.balance)],
+                                ["رصيد الصيدلية", b.knownBalance?fmtNum(b.balance):'غير مؤكد'],
                                 ["متوسط منصرف (30 يومًا)", fmtNum(b.amc, 1)],
                                 ["متوسط يومي", fmtNum(b.adc, 2)],
                                 ["تغطية الصيدلية (يوم)", b.days == null ? "—" : `${b.days.toFixed(0)}`],
@@ -705,7 +716,7 @@ export default function Items() {
                                   ["تغطية المستشفى (يوم)", r.hospitalDays == null ? "—" : `${r.hospitalDays.toFixed(0)}`],
                                 ] as [string, string][]) : []),
                               ]}
-                              calc={`الحساب: ${fmtNum(b.balance)} ÷ ${fmtNum(b.adc, 2)} = ${b.days == null ? "—" : b.days.toFixed(1)} يوم (هدف ${target}).`}
+                              calc={b.knownBalance?`الحساب: ${fmtNum(b.balance)} ÷ ${fmtNum(b.adc, 2)} = ${b.days == null ? "—" : b.days.toFixed(1)} يوم (هدف ${target}).`:'لا تحسب التغطية من رصيد غير مؤكد.'}
                               why={whyText(r)} />
                           </td>
                         </tr>

@@ -1,0 +1,12 @@
+const fs=require('fs'),path=require('path'),Module=require('module'),assert=require('assert/strict');
+const packageDir=path.resolve(process.argv[2]),archive=path.join(packageDir,'resources','app.asar');
+const tests=process.argv.slice(3);
+assert.ok(fs.existsSync(archive),'Missing app.asar');
+const packagedRequire=Module.createRequire(path.join(archive,'package.json'));
+const Database=packagedRequire('better-sqlite3');
+const memory=new Database(':memory:');assert.equal(memory.prepare('SELECT 17 n').get().n,17);memory.close();
+console.log('Packaged SQLite native module loaded successfully.');
+if(tests.length!==1)throw new Error('Run one isolated test suite per process');
+const source=path.resolve(tests[0]),filename=path.join(archive,'electron','test',path.basename(source));
+const test=new Module(filename,module);test.filename=filename;test.paths=Module._nodeModulePaths(path.dirname(filename));
+test._compile(fs.readFileSync(source,'utf8'),filename);

@@ -1,4 +1,5 @@
 import { Link } from "react-router-dom";
+import { useAuth } from '@/hooks/useAuth';
 import { Card } from "@/components/ui/card";
 import PageHeader from "@/components/PageHeader";
 import {
@@ -91,6 +92,10 @@ const CARDS: Card6[] = [
 ];
 
 export default function OperationCenter() {
+  const { roles }=useAuth();
+  if(roles.some(role=>['system_admin','pharmacy_manager'].includes(role)))return <div className="p-6 space-y-5" dir="rtl"><h1 className="text-2xl font-bold">مركز التشغيل</h1><div className="grid md:grid-cols-3 gap-4">{[
+    ['/branch-access','الفروع والمستخدمون'],['/my-pharmacy','التحديثات والاعتمادات'],['/upload','رفع ملف Excel مجمع'],['/report-center','مركز التقارير'],['/stock-transactions','الحركات اليومية'],['/workflows','دليل التشغيل']
+  ].map(([to,title])=><Link key={to} to={to}><Card className="p-6 font-bold hover:bg-muted">{title}</Card></Link>)}</div></div>;
   return (
     <div className="p-6 max-w-[1200px] mx-auto" dir="rtl">
       <PageHeader

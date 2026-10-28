@@ -5,8 +5,10 @@ import { analyzeMovements, fmtMonth, fmtNum, KIND_CLASS, KIND_LABEL, normalize, 
 import { loadContinuousAnalysis, type ProjectedRow } from "@/lib/continuousAnalysis";
 import { classifyStatus } from "@/lib/statusRules";
 import ItemIdentity from "@/components/ItemIdentity";
+import {useInventoryRevision} from '../../../shared/useLiveInventory';
 
 export default function Items() {
+  const revision=useInventoryRevision();
   const [searchParams] = useSearchParams();
   const [batches, setBatches] = useState<UploadBatch[]>([]);
   const [batchId, setBatchId] = useState(searchParams.get("batch") || "");
@@ -41,7 +43,7 @@ export default function Items() {
       } finally { if (!cancelled) setLoading(false); }
     })();
     return () => { cancelled = true; };
-  }, [batchId, target]);
+  }, [batchId, target, revision]);
 
   const rows = useMemo(() => batchId ? analyzeMovements(movements, target) : current, [batchId, movements, current, target]);
   const locations = useMemo(() => Array.from(new Set(rows.filter((r) => !isMainLocation(r.locationType)).map((r) => r.locationName))), [rows]);

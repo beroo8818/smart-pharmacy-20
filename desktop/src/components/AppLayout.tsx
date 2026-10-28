@@ -1,6 +1,7 @@
 import { ReactNode } from "react";
 import { NavLink, useNavigate } from "react-router-dom";
 import { useAuth } from "@/hooks/useAuth";
+import { canSeeNav } from "@/lib/permissions";
 import {
   LayoutDashboard,
   Upload,
@@ -35,6 +36,13 @@ const ROLE_LABEL: Record<string, string> = {
 };
 
 const nav = [
+  { to: "/my-pharmacy", label: "صيدليتي والتحديثات", icon: Pill },
+  { to: "/branch-access", label: "إدارة الفروع والمستخدمين", icon: Settings },
+  { to: "/permissions", label: "صلاحيات المستخدمين", icon: Settings },
+  { to: "/data-freshness", label: "متابعة تحديث الصيدليات", icon: History },
+  { to: "/report-center", label: "مركز التقارير", icon: FileBarChart },
+  { to: "/workflows", label: "دليل التشغيل خطوة بخطوة", icon: HelpCircle },
+  { to: "/account", label: "كلمة مرور حسابي", icon: Settings },
   { to: "/home", label: "مركز التشغيل", icon: Compass },
   { to: "/dashboard", label: "اللوحة الرئيسية", icon: LayoutDashboard },
   { to: "/daily", label: "مركز العمل اليومي", icon: Target },
@@ -60,7 +68,7 @@ const nav = [
 ];
 
 export default function AppLayout({ children }: { children: ReactNode }) {
-  const { user, signOut, roles } = useAuth();
+  const { user, signOut, roles,access } = useAuth();
   const navigate = useNavigate();
 
   const handleSignOut = async () => {
@@ -85,7 +93,7 @@ export default function AppLayout({ children }: { children: ReactNode }) {
           </div>
         </div>
         <nav className="flex-1 p-3 space-y-1 overflow-y-auto">
-          {nav.filter((n: any) => !n.adminOnly || roles.includes("system_admin")).map((n) => (
+          {nav.filter((n) => canSeeNav(roles, n.to,access)).map((n) => (
             <NavLink
               key={n.to}
               to={n.to}

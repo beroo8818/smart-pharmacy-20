@@ -25,7 +25,7 @@ describe("actual monthly hospital dispensing", () => {
   });
   it("replaces revisions and ignores balance-only updates", () => {
     const result = history([observation("jan", 310), observation("revision", 620), observation("update", 999)])[0];
-    expect(result.consumptionPeriods).toEqual([{ month: "2026-01-01", issued: 620, reportedSkus: 1, totalSkus: 1 }]);
+    expect(result.consumptionPeriods).toEqual([{ month: "2026-01-01", issued: 620, reportedSkus: 1, totalSkus: 1,partial:false,ranges:[{from:'2026-01-01',to:'2026-01-31'}] }]);
   });
   it("retains all available periods independently of the forecasting window", () => {
     const result = buildInventoryHistory([...batches, { id: "feb", month: "2026-02-01", snapshot_date: "2026-03-01" }],

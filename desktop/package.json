@@ -1,7 +1,7 @@
 {
   "name": "dawa-desktop",
   "productName": "Dawa",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "دواء — إدارة أرصدة المستشفى (نسخة سطح المكتب)",
   "main": "electron/main.cjs",
   "author": "Dawa",
@@ -10,8 +10,9 @@
     "dev:vite": "vite --host 127.0.0.1 --port 5180",
     "dev": "concurrently -k -n vite,electron \"npm:dev:vite\" \"wait-on http://127.0.0.1:5180 && electron .\"",
     "build:web": "vite build",
-    "build:win": "npm run build:web && electron-builder --win --x64",
-    "build:portable": "npm run build:web && electron-builder --win portable --x64"
+    "build:icon": "powershell -NoProfile -Command \"& '../scripts/build-icon.ps1'\"",
+    "build:win": "npm run build:web && npm run build:icon && node ../scripts/build-windows.mjs --msi",
+    "build:portable": "npm run build:web && npm run build:icon && node ../scripts/build-windows.mjs --dir"
   },
   "dependencies": {
     "@hookform/resolvers": "^3.10.0",
@@ -88,12 +89,18 @@
   "build": {
     "appId": "com.dawa.hospital",
     "productName": "Dawa",
+    "executableName": "Dawa",
+    "npmRebuild": false,
     "copyright": "Copyright © 2026 Dawa",
     "directories": {
       "output": "release",
       "buildResources": "build"
     },
     "files": [
+      {
+        "from": "../shared/permissionCatalog.json",
+        "to": "electron/permissionCatalog.json"
+      },
       "dist/**/*",
       "electron/**/*",
       "node_modules/xlsx/**/*",
@@ -126,8 +133,10 @@
         "en-US"
       ],
       "language": "1025",
-      "deleteAppDataOnUninstall": false,
-      "include": "build/installer.nsh"
+      "deleteAppDataOnUninstall": false
+    },
+    "portable": {
+      "artifactName": "Dawa-Portable-${version}-${arch}.${ext}"
     }
   }
 }

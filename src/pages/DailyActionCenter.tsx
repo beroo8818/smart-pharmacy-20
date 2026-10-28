@@ -24,7 +24,9 @@ import {
   type Priority, useVitalSet,
 } from "@/lib/priority";
 import { logAudit } from "@/lib/audit";
-import { canApproveRecommendation } from "@/lib/permissions";
+import {hasPermission} from '../../shared/accessPolicy';
+import {notifyInventoryChanged} from '../../shared/inventoryRefresh';
+import {fetchPagedRows} from '@/lib/pagedQuery';
 
 const db = supabase as any;
 
@@ -40,6 +42,7 @@ type Rec = {
   itemName: string;
   tradeNames: string[];
   itemCode: string | null;
+  unit?:string|null;
   to: string;
   from?: string;
   problem: string;   // مشكلة بسيطة
@@ -59,17 +62,16 @@ type DecisionOptions = {
 
 function useDecisions(batchId: string | null) {
   const qc = useQueryClient();
-  const { user, roles } = useAuth();
+  const { user, roles,access } = useAuth();
+  const [saving,setSaving]=useState(false);
   const q = useQuery({
     queryKey: ["recommendation_actions_dac", batchId],
     enabled: !!batchId,
     queryFn: async () => {
-      const { data, error } = await db.from("recommendation_actions")
-        .select("recommendation_key,status,acted_at")
+      const data = await fetchPagedRows<any>(()=>db.from("recommendation_actions")
+        .select("id,recommendation_key,status,acted_at")
         .eq("upload_batch_id", batchId)
-        .order("acted_at", { ascending: false })
-        .range(0, 9999);
-      if (error) throw error;
+        .order("acted_at", { ascending: false }).order('id',{ascending:false}));
       const map: Record<string, DecisionStatus> = {};
       for (const r of (data || []) as any[]) {
         if (!map[r.recommendation_key]) map[r.recommendation_key] = r.status as DecisionStatus;
@@ -78,12 +80,13 @@ function useDecisions(batchId: string | null) {
     },
   });
   async function setDecision(r: Rec, status: DecisionStatus, options: DecisionOptions = {}) {
+    if(saving)return;
     if (!batchId || !user) {
       toast({ title: "تعذر الحفظ", description: "يجب تسجيل الدخول.", variant: "destructive" });
       return;
     }
-    if (!canApproveRecommendation(roles)) {
-      toast({ title: "غير مسموح", description: "ليس لديك صلاحية اتخاذ قرار على التوصيات. هذه الصلاحية لمدير الصيدلية أو مدير النظام.", variant: "destructive" });
+    if (!hasPermission(roles,access,'decisions.write')) {
+      toast({ title: "غير مسموح", description: "اطلب منح بند تسجيل قرارات التوصيات من المدير.", variant: "destructive" });
       return;
     }
     const canRecordOverride = status === "approved" || status === "executed";
@@ -100,14 +103,20 @@ function useDecisions(batchId: string | null) {
       if (qStr === null) return;
       note = window.prompt("ملاحظة (اختياري):", "") || null;
       const n = qStr.trim() === "" ? NaN : Number(qStr);
-      executed_qty = Number.isFinite(n) ? n : null;
+      if(!Number.isFinite(n)||n<=0){toast({title:'كمية غير صالحة',description:'اكتب كمية منفذة موجبة؛ القرار لا ينشئ حركة مخزون.',variant:'destructive'});return;}
+      executed_qty = n;
     }
+    setSaving(true);
+    try{
     const { error } = await db.from("recommendation_actions").insert({
       upload_batch_id: batchId,
       recommendation_key: r.id,
       recommendation_type: r.kind,
       item_key: r.itemKey,
       item_name: r.itemName,
+      item_code:r.itemCode,
+      unit:r.unit||null,
+      client_id:crypto.randomUUID(),
       from_location: r.from || null,
       to_location: r.to,
       suggested_qty: r.qty ?? null,
@@ -120,7 +129,7 @@ function useDecisions(batchId: string | null) {
       override_reason: overrideReason || null,
       therapeutic_group_key: options.therapeuticGroupKey || null,
     });
-    if (error) { toast({ title: "تعذر الحفظ", description: error.message, variant: "destructive" }); return; }
+    if (error) throw error;
     toast({ title: "تم الحفظ", description: STATUS_LABEL[status] });
     await logAudit({
       userId: user.id,
@@ -144,8 +153,10 @@ function useDecisions(batchId: string | null) {
     });
     qc.invalidateQueries({ queryKey: ["recommendation_actions_dac", batchId] });
     qc.invalidateQueries({ queryKey: ["recommendation_actions_log"] });
+    notifyInventoryChanged();
+    }catch(e){toast({title:'تعذر الحفظ',description:(e as Error).message,variant:'destructive'});}finally{setSaving(false);}
   }
-  return { decisions: q.data || {}, setDecision };
+  return { decisions: q.data || {}, setDecision,saving, loading:q.isLoading,error:q.error };
 }
 
 export default function DailyActionCenter() {
@@ -155,17 +166,16 @@ export default function DailyActionCenter() {
   const [whyOpen, setWhyOpen] = useState<string | null>(null);
   const [allowUnreviewed, setAllowUnreviewed] = useState(false);
   const [overrideReason, setOverrideReason] = useState("");
-  const { roles } = useAuth();
-  const canOverrideUnreviewed = roles.some((r) => ["system_admin", "pharmacy_manager", "warehouse_keeper"].includes(r));
+  const { roles,access } = useAuth();
+  const canOverrideUnreviewed = hasPermission(roles,access,'decisions.write')&&hasPermission(roles,access,'dictionary.write');
   const navigate = useNavigate();
 
   // Active ingredient dictionary: map original_item_name -> approval / group info.
   const dictQ = useQuery({
     queryKey: ["aid-dac"],
     queryFn: async () => {
-      const { data } = await db.from("active_ingredient_dictionary")
-        .select("original_item_name,approved,needs_review,therapeutic_group_key,standard_name")
-        .range(0, 9999);
+      const data = await fetchPagedRows<any>(()=>db.from("active_ingredient_dictionary")
+        .select("id,original_item_name,approved,needs_review,therapeutic_group_key,standard_name").order('id'));
       return (data || []) as Array<{
         original_item_name: string; approved: boolean; needs_review: boolean;
         therapeutic_group_key: string | null; standard_name: string | null;
@@ -244,7 +254,8 @@ export default function DailyActionCenter() {
     },
   });
 
-  const { decisions, setDecision } = useDecisions(batch?.id || null);
+  const { decisions, setDecision,saving,loading:decisionsLoading,error:decisionsError } = useDecisions(batch?.id || null);
+  const canDecide=hasPermission(roles,access,'decisions.write');
 
   // Build recommendations grouped by item to apply main-store reserve logic
   const recs = useMemo<Rec[]>(() => {
@@ -287,7 +298,7 @@ export default function DailyActionCenter() {
         out.push({
           id: `ur:${b.itemKey}:${b.locationName}`,
           section: "urgent",
-          itemKey: recItemKey, itemName, tradeNames: recTradeNames, itemCode, to: b.locationName,
+          itemKey: recItemKey, itemName, tradeNames: recTradeNames, itemCode,unit:itemSample.unit, to: b.locationName,
           problem: `الرصيد ${fmtNum(b.balance)} يكفي ${b.days?.toFixed(1)} يوم فقط — أقل من 7 أيام.`,
           action: `وفّر الصنف فورًا لـ ${b.locationName}.`,
           why: `الرصيد ${fmtNum(b.balance)} ÷ متوسط الصرف اليومي ${fmtNum(b.adc, 2)} = ${b.days?.toFixed(1)} يوم.`,
@@ -325,7 +336,7 @@ export default function DailyActionCenter() {
           out.push({
             id: `dm:${n.loc.itemKey}:${n.loc.locationName}:${ms.locationName}`,
             section: "main",
-            itemKey: recItemKey, itemName, tradeNames: recTradeNames, itemCode, to: n.loc.locationName, from: ms.locationName,
+            itemKey: recItemKey, itemName, tradeNames: recTradeNames, itemCode,unit:itemSample.unit, to: n.loc.locationName, from: ms.locationName,
             problem: `${n.loc.locationName} تغطي ${n.loc.days?.toFixed(1) ?? "—"} يوم — أقل من الهدف ${target}.`,
             action: `اصرف ${fmtNum(give)} من ${ms.locationName} إلى ${n.loc.locationName}.`,
             why:
@@ -364,7 +375,7 @@ export default function DailyActionCenter() {
             out.push({
               id: `tr:${n.loc.itemKey}:${n.loc.locationName}:${d.loc.locationName}`,
               section: "transfer",
-              itemKey: recItemKey, itemName, tradeNames: recTradeNames, itemCode, to: n.loc.locationName, from: d.loc.locationName,
+              itemKey: recItemKey, itemName, tradeNames: recTradeNames, itemCode,unit:itemSample.unit, to: n.loc.locationName, from: d.loc.locationName,
               problem: `${d.loc.locationName} لديها فائض (${fromBeforeDays?.toFixed(0)} يوم)، ${n.loc.locationName} ناقصة (${toBeforeDays?.toFixed(0)} يوم).`,
               action: `حوّل ${fmtNum(give)} من ${d.loc.locationName} إلى ${n.loc.locationName}.`,
               why:
@@ -400,7 +411,7 @@ export default function DailyActionCenter() {
         out.push({
           id: `po:${recItemKey}`,
           section: "purchase",
-          itemKey: recItemKey, itemName, tradeNames: recTradeNames, itemCode,
+          itemKey: recItemKey, itemName, tradeNames: recTradeNames, itemCode, unit:itemSample.unit,
           to: unmetBranches.length === 1 ? unmetBranches[0] : "المستشفى",
           problem:
             `نقص على مستوى المستشفى: لا يوجد رصيد كافٍ بالمخزن الرئيسي ولا فائض بالفروع لتغطية ${unmetBranches.join("، ")}.`,
@@ -429,7 +440,7 @@ export default function DailyActionCenter() {
         out.push({
           id: `nd:${b.itemKey}:${b.locationName}`,
           section: "no_order",
-          itemKey: recItemKey, itemName, tradeNames: recTradeNames, itemCode, to: b.locationName,
+          itemKey: recItemKey, itemName, tradeNames: recTradeNames, itemCode,unit:itemSample.unit, to: b.locationName,
           problem: dead
             ? `رصيد ${fmtNum(b.balance)} بدون أي صرف هذا الشهر — صنف راكد.`
             : `الرصيد يغطي ${b.days?.toFixed(0)} يوم — أكثر من ضعف الهدف.`,
@@ -445,7 +456,7 @@ export default function DailyActionCenter() {
         out.push({
           id: `rv:${b.itemKey}:${b.locationName}`,
           section: "review",
-          itemKey: recItemKey, itemName, tradeNames: recTradeNames, itemCode, to: b.locationName,
+          itemKey: recItemKey, itemName, tradeNames: recTradeNames, itemCode,unit:itemSample.unit, to: b.locationName,
           problem: "البيانات غير كافية للحساب (لا صرف ولا رصيد واضح).",
           action: "راجع صف هذا الصنف في ملف الإكسل.",
           why: `رصيد ${fmtNum(b.balance)} • منصرف ${fmtNum(b.issued)}.`,
@@ -489,7 +500,7 @@ export default function DailyActionCenter() {
   const dqCount = (dqQ.data?.length || 0);
   const reviewCount = review.length + ignoredCount + dqCount;
 
-  const loading = batchQ.isLoading || contQ.isLoading;
+  const loading = batchQ.isLoading || contQ.isLoading || decisionsLoading;
 
   function RecCard({ r }: { r: Rec }) {
     const st = (decisions[r.id] as DecisionStatus) || "new";
@@ -564,10 +575,9 @@ export default function DailyActionCenter() {
                 مراجعة المطابقة
               </Button>
             )}
-            <Button size="sm" variant={st === "approved" ? "default" : "outline"} onClick={() => setDecision(r, "approved", decisionOptions)} disabled={blocked}>اعتماد</Button>
-            <Button size="sm" variant={st === "postponed" ? "default" : "outline"} onClick={() => setDecision(r, "postponed", decisionOptions)}>تأجيل</Button>
-            <Button size="sm" variant={st === "rejected" ? "default" : "outline"} onClick={() => setDecision(r, "rejected", decisionOptions)}>رفض</Button>
-            <Button size="sm" variant={st === "executed" ? "default" : "outline"} onClick={() => setDecision(r, "executed", decisionOptions)} disabled={blocked}>تم التنفيذ</Button>
+            <Button size="sm" variant={st === "postponed" ? "default" : "outline"} onClick={() => setDecision(r, "postponed", decisionOptions)} disabled={!canDecide||saving}>تأجيل</Button>
+            <Button size="sm" variant={st === "rejected" ? "default" : "outline"} onClick={() => setDecision(r, "rejected", decisionOptions)} disabled={!canDecide||saving}>رفض</Button>
+            <Button size="sm" variant={st === "executed" ? "default" : "outline"} onClick={() => setDecision(r, "executed", decisionOptions)} disabled={blocked||!canDecide||saving}>تسجيل كمنفذ</Button>
           </div>
         </div>
         {open && (
@@ -603,7 +613,7 @@ export default function DailyActionCenter() {
     <div className="p-8 max-w-[1400px]">
       <PageHeader
         title="مركز العمل اليومي"
-        description="تحليل آخر رصيد لكل صنف وموقع مع الحركات الفعلية. يجب التحقق من الرصيد والصلاحية قبل التنفيذ."
+        description="تحليل الرصيد المسجل والحركات الفعلية. تسجيل القرار كمنفذ لا يحرك المخزون؛ سجل الحركة الفعلية مرة واحدة."
       />
 
       {preliminary && (
@@ -675,12 +685,14 @@ export default function DailyActionCenter() {
         )}
         {!canOverrideUnreviewed && (
           <div className="mt-2 text-xs text-muted-foreground">
-            التجاوز متاح فقط لمدير النظام أو مدير الصيدلية أو أمين المخزن.
+            التجاوز يحتاج بند تسجيل القرارات وبند تعديل القاموس من شاشة الصلاحيات.
           </div>
         )}
       </Card>
 
-      {loading ? (
+      {batchQ.error || contQ.error || decisionsError || dictQ.error ? (
+        <div role="alert" className="p-4 border border-destructive text-destructive">تعذر قراءة بيانات التوصيات أو سجل القرارات. راجع الاتصال وترقيات القاعدة قبل التنفيذ.</div>
+      ) : loading ? (
         <div className="text-muted-foreground">جارٍ التحميل...</div>
       ) : !batch ? (
         <Card className="p-8 text-center text-muted-foreground">لا توجد بيانات محفوظة. ارفع ملفًا واحفظه أولًا.</Card>

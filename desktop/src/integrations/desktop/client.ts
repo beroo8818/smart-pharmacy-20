@@ -1,14 +1,21 @@
-export type Role = "system_admin" | "pharmacy_manager" | "warehouse_keeper" | "viewer";
-export interface SessionUser { id: string; username: string; full_name: string; role: Role; }
+import {notifyInventoryChanged} from '../../../../shared/inventoryRefresh';
+import type {AccessProfile} from '../../../../shared/accessPolicy';
+export type Role = "system_admin" | "pharmacy_manager" | "warehouse_keeper" | "viewer" | "sub_pharmacist";
+export interface SessionUser { id: string; username: string; full_name: string; role: Role; assigned_location_id?: string | null;access?:AccessProfile; }
 
 export interface UploadBatch {
   id: string; file_name: string; month: string; status: string;
   row_count: number; uploaded_by: string | null; uploaded_at: string; notes: string | null;
   snapshot_date?: string | null;
+  snapshot_boundary?: string | null;
   batch_kind?: string | null;
+  issued_from?: string | null; issued_to?: string | null;
+  received_from?: string | null; received_to?: string | null;
 }
 
 export interface Movement {
+  therapeutic_group_key?:string|null;
+  issued_from?: string | null; issued_to?: string | null;
   id: string; upload_batch_id: string; item_master_id: string; location_id: string;
   month: string; opening_balance: number; received_qty: number; issued_qty: number | null;
   closing_balance: number | null; unit_price: number | null; expiry_date: string | null;
@@ -20,11 +27,12 @@ export interface Movement {
 }
 
 type Api = {
+  operations: { call: (args: { token: string; action: string; payload?: Record<string, unknown> }) => Promise<any> };
   auth: {
     login: (a: { username: string; password: string }) => Promise<{ ok: boolean; token?: string; user?: SessionUser; error?: string }>;
     logout: (a: { token: string }) => Promise<{ ok: boolean }>;
     me: (a: { token: string }) => Promise<{ ok: boolean; user?: SessionUser }>;
-    changePassword: (a: { token: string; oldPassword: string; newPassword: string }) => Promise<{ ok: boolean; error?: string }>;
+    changePassword: (a: { token: string; currentPassword: string; newPassword: string }) => Promise<{ ok: boolean; error?: string }>;
     listUsers: (a: { token: string }) => Promise<{ ok: boolean; users?: any[]; error?: string }>;
     createUser: (a: { token: string; username: string; full_name: string; password: string; role: Role }) => Promise<{ ok: boolean; error?: string }>;
     setUserActive: (a: { token: string; userId: string; active: boolean }) => Promise<{ ok: boolean }>;
@@ -45,13 +53,13 @@ type Api = {
   };
   backup: {
     export: (a: { token: string }) => Promise<{ ok: boolean; path?: string; error?: string }>;
-    restore: (a: { token: string }) => Promise<{ ok: boolean; error?: string }>;
+    restore: (a: { token: string; confirm?:boolean }) => Promise<{ ok: boolean; restartRequired?:boolean; error?: string }>;
   };
   maintenance: {
     wipeAll: (a: { token: string }) => Promise<{ ok: boolean; error?: string }>;
   };
   stockTxn: {
-    list: (a: { token: string; sinceISO?: string; limit?: number }) => Promise<{ ok: boolean; rows?: StockTxn[]; error?: string }>;
+    list: (a: { token: string; sinceISO?: string; limit?: number; all?: boolean }) => Promise<{ ok: boolean; rows?: StockTxn[]; error?: string }>;
     insert: (a: { token: string; txn: Omit<StockTxn, "id" | "created_at" | "created_by"> }) => Promise<{ ok: boolean; id?: string; error?: string }>;
     delete: (a: { token: string; id: string }) => Promise<{ ok: boolean; error?: string }>;
   };
@@ -76,6 +84,7 @@ export type StockTxnType =
   | "pharmacy_return_to_warehouse";
 
 export interface StockTxn {
+  issued_from?:string|null;issued_to?:string|null;
   id: string;
   txn_date: string;
   txn_type: StockTxnType;
@@ -119,13 +128,29 @@ function stub(): Api {
     return Promise.resolve({ ok: false, error: "Electron API غير متاح" });
   };
   const g: Partial<Record<keyof Api, unknown>> = {};
-  for (const ns of ["auth", "queries", "upload", "backup", "maintenance", "stockTxn", "audit", "app"]) {
+  for (const ns of ["operations", "auth", "queries", "upload", "backup", "maintenance", "stockTxn", "audit", "app"]) {
     g[ns] = new Proxy({}, { get: () => warn });
   }
   return g as Api;
 }
 
-export const api: Api = (typeof window !== "undefined" ? window.api : undefined) || stub();
+const rawApi: Api = (typeof window !== "undefined" ? window.api : undefined) || stub();
+function inventoryWrite<F extends (...args: any[]) => Promise<any>>(write: F): F {
+  return (async (...args: Parameters<F>) => {
+    const result = await write(...args);
+    if (result?.ok && !result.requiresRevision && !result.duplicate) notifyInventoryChanged();
+    return result;
+  }) as F;
+}
+export const api: Api = {...rawApi,
+  upload: {...rawApi.upload, saveBatch: inventoryWrite(args => rawApi.upload.saveBatch(args))},
+  stockTxn: {...rawApi.stockTxn, insert: inventoryWrite(args => rawApi.stockTxn.insert(args)), delete: inventoryWrite(args => rawApi.stockTxn.delete(args))},
+  operations: {...rawApi.operations, call: async args => {
+    const result = await rawApi.operations.call(args);
+    if (result?.ok && ['submit','access_save','assign','revoke','recommendation_save','recommendation_import_legacy'].includes(args.action) && !result.requiresRevision && !result.duplicate) notifyInventoryChanged();
+    return result;
+  }},
+};
 
 const TOKEN_KEY = "dawa_token";
 export const tokenStore = {

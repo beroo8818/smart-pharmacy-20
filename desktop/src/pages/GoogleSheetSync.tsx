@@ -1,4 +1,6 @@
 import { useMemo, useState } from "react";
+import {validateReportDates,todayISO,type ReportDates} from '../../../shared/inventoryHistory';
+import ReportPeriodFields from '../../../shared/components/ReportPeriodFields';
 import * as XLSX from "xlsx";
 import { useNavigate } from "react-router-dom";
 import { api, tokenStore } from "@/integrations/desktop/client";
@@ -106,6 +108,7 @@ export default function GoogleSheetSync() {
   const [url, setUrl] = useState("");
   const [defaultMonth, setDefaultMonth] = useState("");
   const [snapshotDate, setSnapshotDate] = useState("");
+  const [reportDates,setReportDates]=useState<ReportDates>({});
   const [sourceLabel, setSourceLabel] = useState("");
   const [csvText, setCsvText] = useState("");
   const [syncedAt, setSyncedAt] = useState<Date | null>(null);
@@ -117,7 +120,6 @@ export default function GoogleSheetSync() {
   const effectiveMonth = defaultMonth ? `${defaultMonth}-01` : null;
   function setDefaultMonthAndSnapshot(value: string) {
     setDefaultMonth(value);
-    setSnapshotDate(value ? lastDayOfMonth(value) : "");
   }
   const result = useMemo(() => csvText ? parseCsvText(csvText, effectiveMonth) : null, [csvText, effectiveMonth]);
 
@@ -153,6 +155,9 @@ export default function GoogleSheetSync() {
     if (!result?.rows.length) { setMsg("تم رفع ملف جديد لكن لا توجد صفوف محفوظة صالحة للتحليل. راجع شاشة مراجعة البيانات."); return; }
     if (!effectiveMonth) { setMsg("اختر الشهر الافتراضي قبل الحفظ"); return; }
     if (!snapshotDate) { setMsg("اختر تاريخ الرصيد قبل الحفظ"); return; }
+    let dates:ReportDates;
+    try{dates=validateReportDates(effectiveMonth,snapshotDate,'monthly',reportDates,todayISO(),true);}
+    catch(e){setMsg((e as Error).message);return;}
     setSaving(true); setMsg("جارٍ الحفظ...");
     try {
       const rows = result.rows.map((r) => ({
@@ -161,12 +166,15 @@ export default function GoogleSheetSync() {
         unit: r.unit, location: r.location, location_type: r.location_type,
         month: r.month || effectiveMonth, issued_qty: r.issued_qty, closing_balance: r.closing_balance,
       }));
-      const res = await api.upload.saveBatch({
+      const payload={
         token: tokenStore.get(),
         fileName: `[google_sheet_csv] ${sourceLabel || "sheet.csv"}`.slice(0, 250),
         month: effectiveMonth, rows, ignored: result.rejected,
         snapshotDate, batchKind: "monthly",
-      });
+        ...dates,
+      };
+      let res = await api.upload.saveBatch(payload);
+      if(res.requiresRevision&&confirm(res.error))res=await api.upload.saveBatch({...payload,confirmRevision:true});
       if (!res.ok) { setMsg(res.error || "فشل الحفظ"); return; }
       setSaved({ id: res.batchId, rows: res.rows }); setMsg(`تم حفظ ${fmtNum(res.rows)} صف بنجاح.`);
     } finally { setSaving(false); }
@@ -189,6 +197,7 @@ export default function GoogleSheetSync() {
           </label>
         </div>
 
+        <ReportPeriodFields month={effectiveMonth||''} kind="monthly" value={reportDates} onChange={setReportDates}/>
         <div className="grid md:grid-cols-[1fr_auto] gap-3 items-end">
           <label><span className="label">رابط Google Sheet (يُحوّل تلقائيًا إلى CSV)</span>
             <input className="input" dir="ltr" placeholder="https://docs.google.com/spreadsheets/d/.../edit#gid=0"

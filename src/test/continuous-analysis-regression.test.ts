@@ -3,6 +3,8 @@ import { readFileSync } from "node:fs";
 import vm from "node:vm";
 import ts from "typescript";
 import * as history from "../../shared/inventoryHistory";
+import * as ledger from "../../shared/stockLedger";
+import {buildShortageReport} from '../../shared/shortageReports';
 import { planTransfers } from "../../shared/transferPlan";
 import * as ingredients from "@/lib/activeIngredient";
 
@@ -31,7 +33,7 @@ function pureModule(file: string, injection: Record<string, unknown> = {}) {
 const desktopRules = pureModule("desktop/src/lib/statusRules.ts");
 const desktopAnalytics = pureModule("desktop/src/lib/desktopAnalytics.ts", { ...ingredients, ...history, ...desktopRules, isMainLoc: desktopRules.isMainLocation, planTransfers });
 const desktop = pureModule("desktop/src/lib/continuousAnalysis.ts", {
-  ...history, ...desktopAnalytics, tokenStore: { get: () => "test-only" },
+  ...history, ...ledger, ...desktopAnalytics, tokenStore: { get: () => "test-only" },
   api: { queries: {
     listBatchesContinuous: async () => ({ ok: true, batches: fixture.tables.upload_batches }),
     movementsByBatchIds: async ({ batchIds }: any) => ({ ok: true, movements: fixture.tables.inventory_movements.filter((m) => batchIds.includes(m.upload_batch_id))
@@ -52,6 +54,13 @@ for (const [name, load] of [["web", loadContinuousAnalysis], ["desktop", desktop
       expect(result.rows[0].snapshotBalance).toBe(80);
       expect(result.rows[0].monthsOfData).toBe(1);
     });
+    it('calculates a partial current month using its actual 25 days and independent balance date',async()=>{
+      fixture.tables.upload_batches=[batch('partial',{month:'2026-10-01',snapshot_date:'2026-10-27',issued_from:'2026-10-01',issued_to:'2026-10-25'})];
+      fixture.tables.inventory_movements=[movement('a','partial',{month:'2026-10-01',issued_quantity:250,current_balance:50})];
+      const result=await load({asOf:'2026-10-28'});
+      expect(result.rows[0].adc).toBe(10);expect(result.rows[0].activeDays).toBe(25);
+      expect(result.rows[0].snapshotBalance).toBe(50);expect(result.rows[0].snapshotDate).toBe('2026-10-27');
+    });
     it("separates actual dispensing from forecast deductions", async () => {
       fixture.tables.stock_transactions.push({ id: "txn", txn_date: "2026-05-02", txn_type: "pharmacy_issue", item_key: "P500", item_code: "P500", unit: "tab", from_location_name: "branch", from_location_type: "sub_pharmacy", qty: 20, created_at: "2026-05-02T10:00:00Z" });
       const result = await load({ asOf: "2026-05-03" });
@@ -59,12 +68,107 @@ for (const [name, load] of [["web", loadContinuousAnalysis], ["desktop", desktop
       expect(result.rows[0].projectedBalance).toBe(80);
       expect(result.rows[0].projectionSuppressed).toBe(true);
     });
+    it('forecasts only days not explicitly covered by an actual issue period',async()=>{
+      fixture.tables.stock_transactions=[{id:'dated',txn_date:'2026-05-03',txn_type:'pharmacy_issue',item_key:'P500',unit:'tab',from_location_name:'branch',from_location_type:'sub_pharmacy',qty:20,issued_from:'2026-05-02',issued_to:'2026-05-03'}];
+      const row=(await load({asOf:'2026-05-04'})).rows[0];
+      expect(row.balance).toBe(80);expect(row.expectedConsumption).toBe(10);expect(row.projectedBalance).toBe(70);expect(row.projectionSuppressed).toBe(false);
+    });
+    it('does not split actual period totals across a stock snapshot boundary',async()=>{
+      fixture.tables.stock_transactions=[{id:'crossing',txn_date:'2026-05-03',txn_type:'pharmacy_issue',item_key:'P500',unit:'tab',from_location_name:'branch',from_location_type:'sub_pharmacy',qty:20,issued_from:'2026-04-30',issued_to:'2026-05-03'}];
+      const row=(await load({asOf:'2026-05-04'})).rows[0];expect(row.hasBalance).toBe(false);expect(row.kind).toBe('no_data');expect(row.ledgerWarnings.join(' ')).toContain('تتداخل مع رصيد الجرد');
+    });
     it("ignores future inventory and future transactions", async () => {
       fixture.tables.upload_batches.push(batch("future", { snapshot_date: "2026-12-31" }));
       fixture.tables.inventory_movements.push(movement("future", "future", { current_balance: 900 }));
       fixture.tables.stock_transactions.push({ txn_date: "2026-12-31", txn_type: "pharmacy_issue", item_key: "P500", from_location_name: "branch", from_location_type: "sub_pharmacy", qty: 100 });
       const result = await load({ asOf: "2026-05-03" });
       expect(result.rows[0].balance).toBe(100);
+    });
+    it('exposes a transfer-only receiver without inventing its opening balance',async()=>{
+      fixture.tables.inventory_movements=[movement('w','monthly',{location_name:'warehouse',location_type:'main_warehouse',current_balance:100,issued_quantity:null})];
+      fixture.tables.stock_transactions=[{id:'t',txn_date:'2026-05-02',txn_type:'warehouse_issue_to_pharmacy',item_key:'P500',unit:'tab',from_location_name:'warehouse',from_location_type:'main_warehouse',to_location_name:'new branch',to_location_type:'sub_pharmacy',qty:30}];
+      const result=await load({asOf:'2026-05-03'});
+      const from=result.rows.find((r:any)=>r.locationName==='warehouse'),to=result.rows.find((r:any)=>r.locationName==='new branch');
+      expect(from.balance).toBe(70);expect(to.ledgerNet).toBe(30);expect(to.hasBalance).toBe(false);
+      expect(to.kind).toBe('no_data');expect(to.days).toBeNull();expect(to.projectedDays).toBeNull();
+      expect(to.ledgerWarnings.join(' ')).toContain('رصيد أساسي');expect(planTransfers(result.rows,30)).toHaveLength(0);
+      expect(result.rows.reduce((sum:number,r:any)=>sum+r.balance,0)).toBe(100);
+    });
+    it('keeps a missing sender visible when stock is returned to the warehouse',async()=>{
+      fixture.tables.inventory_movements=[movement('w','monthly',{location_name:'warehouse',location_type:'main_warehouse',current_balance:100,issued_quantity:null})];
+      fixture.tables.stock_transactions=[{id:'t',txn_date:'2026-05-02',txn_type:'warehouse_return',item_key:'P500',unit:'tab',from_location_name:'unknown branch',from_location_type:'sub_pharmacy',to_location_name:'warehouse',to_location_type:'main_warehouse',qty:30}];
+      const result=await load({asOf:'2026-05-03'});
+      expect(result.rows.find((r:any)=>r.locationName==='warehouse').balance).toBe(130);
+      const unknown=result.rows.find((r:any)=>r.locationName==='unknown branch');
+      expect(unknown.ledgerNet).toBe(-30);expect(unknown.hasBalance).toBe(false);expect(unknown.kind).toBe('no_data');
+    });
+    it('applies same-day movements to a start-of-day balance regardless of upload time',async()=>{
+      fixture.tables.upload_batches=[batch('monthly',{snapshot_boundary:'start_of_day',created_at:'2026-05-20T10:00:00Z'})];
+      fixture.tables.stock_transactions=[{id:'t',txn_date:'2026-05-01',txn_type:'pharmacy_issue',item_key:'P500',unit:'tab',from_location_name:'branch',from_location_type:'sub_pharmacy',qty:20,created_at:'2026-05-01T09:00:00Z'}];
+      const result=await load({asOf:'2026-05-03'});
+      expect(result.rows[0].balance).toBe(80);expect(result.rows[0].hasBalance).toBe(true);
+    });
+    it('does not apply same-day movements twice to an end-of-day balance',async()=>{
+      fixture.tables.upload_batches=[batch('monthly',{snapshot_boundary:'end_of_day'})];
+      fixture.tables.stock_transactions=[{id:'t',txn_date:'2026-05-01',txn_type:'pharmacy_issue',item_key:'P500',unit:'tab',from_location_name:'branch',from_location_type:'sub_pharmacy',qty:20,created_at:'2026-05-30T10:00:00Z'}];
+      const result=await load({asOf:'2026-05-03'});
+      expect(result.rows[0].balance).toBe(100);expect(result.rows[0].issuesAfter).toBe(0);
+    });
+    it('marks legacy same-day movements uncertain rather than guessing by upload time',async()=>{
+      fixture.tables.stock_transactions=[{id:'t',txn_date:'2026-05-01',txn_type:'pharmacy_issue',item_key:'P500',unit:'tab',from_location_name:'branch',from_location_type:'sub_pharmacy',qty:20,created_at:'2026-05-30T10:00:00Z'}];
+      const result=await load({asOf:'2026-05-03'});
+      expect(result.rows[0].hasBalance).toBe(false);expect(result.rows[0].kind).toBe('no_data');
+      expect(result.rows[0].days).toBeNull();expect(result.rows[0].ledgerWarnings.join(' ')).toContain('نفس يوم');
+    });
+    it('separates recorded coverage from projected coverage without changing recorded stock',async()=>{
+      const result=await load({asOf:'2026-05-04'}),row=result.rows[0];
+      expect(row.recordedBalance).toBe(100);expect(row.projectedBalance).toBe(70);
+      expect(row.recordedDays).toBe(10);expect(row.days).toBe(10);expect(row.projectedDays).toBe(7);expect(row.expectedConsumption).toBe(30);
+    });
+    it('moves a forecast into the under-30 report on a new day without changing actual stock',async()=>{
+      fixture.tables.inventory_movements=[movement('a','monthly',{current_balance:310}),movement('w','monthly',{location_name:'warehouse',location_type:'main_warehouse',current_balance:0,issued_quantity:null})];
+      const first=await load({asOf:'2026-05-02'}),next=await load({asOf:'2026-05-03'});
+      expect(buildShortageReport(first.rows,'hospital30','','projected')).toHaveLength(0);
+      expect(buildShortageReport(next.rows,'hospital30','','projected')[0].days).toBe(29);
+      expect(buildShortageReport(next.rows,'hospital30')).toHaveLength(0);
+      expect(next.rows.find((r:any)=>r.locationName==='branch').balance).toBe(310);
+      expect(next.rows.find((r:any)=>r.locationName==='branch').projectedKind).toBe('below');
+      expect(fixture.tables.stock_transactions).toHaveLength(0);
+    });
+    it('reanchors after a newer balance and does not replay covered movements',async()=>{
+      fixture.tables.stock_transactions=[{id:'t',txn_date:'2026-05-02',txn_type:'pharmacy_issue',item_key:'P500',unit:'tab',from_location_name:'branch',from_location_type:'sub_pharmacy',qty:20}];
+      fixture.tables.upload_batches.push(batch('new',{batch_kind:'partial_update',snapshot_date:'2026-05-02',snapshot_boundary:'end_of_day',created_at:'2026-05-05T10:00:00Z'}));
+      fixture.tables.inventory_movements.push(movement('b','new',{issued_quantity:null,current_balance:80}));
+      const result=await load({asOf:'2026-05-03'});
+      expect(result.rows[0].balance).toBe(80);expect(result.rows[0].issuesAfter).toBe(0);expect(result.rows[0].projectedBalance).toBe(70);
+    });
+    it('does not apply a repeated transaction id twice',async()=>{
+      const txn={id:'same',txn_date:'2026-05-02',txn_type:'pharmacy_issue',item_key:'P500',unit:'tab',from_location_name:'branch',from_location_type:'sub_pharmacy',qty:20};
+      fixture.tables.stock_transactions=[txn,txn];
+      expect((await load({asOf:'2026-05-03'})).rows[0].balance).toBe(80);
+    });
+    it('reads all transaction pages rather than truncating live balances',async()=>{
+      fixture.tables.inventory_movements=[movement('a','monthly',{current_balance:20000})];
+      fixture.tables.stock_transactions=Array.from({length:11001},(_,i)=>({id:'t'+i,txn_date:'2026-05-02',txn_type:'pharmacy_issue',item_key:'P500',unit:'tab',from_location_name:'branch',from_location_type:'sub_pharmacy',qty:1}));
+      const result=await load({asOf:'2026-05-03'});
+      expect(result.rows[0].issuesAfter).toBe(11001);expect(result.rows[0].balance).toBe(8999);
+    });
+    it('blocks a mismatched unit instead of silently claiming a reliable balance',async()=>{
+      fixture.tables.stock_transactions=[{id:'t',txn_date:'2026-05-02',txn_type:'pharmacy_issue',item_key:'P500',unit:'box',from_location_name:'branch',from_location_type:'sub_pharmacy',qty:20}];
+      const result=await load({asOf:'2026-05-03'});
+      expect(result.rows[0].balance).toBe(100);expect(result.rows[0].hasBalance).toBe(false);expect(result.rows[0].kind).toBe('no_data');
+    });
+    it('uses the end-of-day snapshot even when a start-of-day file was uploaded later',async()=>{
+      fixture.tables.upload_batches=[batch('end',{snapshot_boundary:'end_of_day'}),batch('start',{snapshot_boundary:'start_of_day',created_at:'2026-05-03T10:00:00Z'})];
+      fixture.tables.inventory_movements=[movement('e','end',{current_balance:80}),movement('s','start',{current_balance:100})];
+      const result=await load({asOf:'2026-05-03'});
+      expect(result.rows[0].snapshotBalance).toBe(80);expect(result.rows[0].snapshotBoundary).toBe('end_of_day');
+    });
+    it('does not treat consumption-only uploads as another stock deduction',async()=>{
+      fixture.tables.upload_batches.push(batch('only',{month:'2026-05-01',batch_kind:'period_consumption',snapshot_date:'2026-05-03',issued_from:'2026-05-01',issued_to:'2026-05-03'}));
+      fixture.tables.inventory_movements.push(movement('b','only',{month:'2026-05-01',issued_quantity:30,current_balance:null}));
+      const result=await load({asOf:'2026-05-03'});
+      expect(result.rows[0].balance).toBe(100);expect(result.rows[0].issuesAfter).toBe(0);expect(result.rows[0].adc).toBe(10);
     });
     it("keeps unknown consumption distinct from zero dispensing", async () => {
       fixture.tables.inventory_movements = [movement("a", "monthly", { issued_quantity: null })];

@@ -14,7 +14,7 @@ export function summarizeConsumption<T extends ConsumptionRow>(rows: T[], item: 
   const reported = locations.filter((location) => location.period !== null);
   const units = new Set(reported.map(({ row }) => (row.unit || "").trim().toLowerCase()));
   const unitCompatible = units.size === 1 && !units.has("");
-  const missing = locations.filter(({ period }) => !period || period.reportedSkus < period.totalSkus);
+  const missing = locations.filter(({ period }) => !period || period.reportedSkus < period.totalSkus || period.partial);
   return {
     locations,
     reportedCount: reported.length,

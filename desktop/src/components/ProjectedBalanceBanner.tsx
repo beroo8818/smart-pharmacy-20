@@ -1,6 +1,7 @@
 import { Card } from "@/components/ui/card";
 import { AlertTriangle, CalendarClock, Activity, ShieldCheck } from "lucide-react";
 import type { ContinuousDataset } from "@/lib/continuousAnalysis";
+import { todayISO } from "../../../shared/inventoryHistory";
 import { CONFIDENCE_CLASS, CONFIDENCE_LABEL, type Confidence } from "@/lib/continuousAnalysis";
 import { fmtNum } from "@/lib/format";
 
@@ -20,15 +21,10 @@ export default function ProjectedBalanceBanner({
   dataset,
 }: { dataset: ContinuousDataset | undefined | null }) {
   if (!dataset || !dataset.latestBatch) return null;
-  const b = dataset.latestBatch;
-  const snapshotDate = b.snapshot_date || b.month || null;
-  const today = new Date().toISOString().substring(0, 10);
-  const daysSince = snapshotDate
-    ? Math.max(0, Math.floor((new Date(today).getTime() - new Date(snapshotDate).getTime()) / 86_400_000))
-    : 0;
-
-  const snapshotTotal = dataset.rows.reduce((a, r) => a + (r.snapshotBalance || 0), 0);
-  const projectedTotal = dataset.rows.reduce((a, r) => a + (r.projectedBalance || 0), 0);
+  const dates = dataset.rows.filter(r=>r.hasBalance).map(r=>r.snapshotDate).filter(Boolean).sort();
+  const snapshotDate = dates[0] || null;
+  const today = todayISO();
+  const daysSince = snapshotDate ? Math.max(0,Math.floor((Date.parse(today)-Date.parse(snapshotDate))/86400000)) : 0;
   const conf = dominantConfidence(dataset.rows);
   const stale = daysSince > 7;
 
@@ -37,7 +33,7 @@ export default function ProjectedBalanceBanner({
       <div className="flex items-center justify-between gap-3 mb-3 flex-wrap">
         <div className="flex items-center gap-2">
           <Activity className="w-5 h-5 text-primary" />
-          <h3 className="font-bold">حالة الرصيد المتوقع اليوم</h3>
+          <h3 className="font-bold">حالة بيانات الرصيد</h3>
         </div>
         <span className={`px-2 py-1 rounded text-xs border ${CONFIDENCE_CLASS[conf]}`}>
           <ShieldCheck className="w-3 h-3 inline ml-1" />
@@ -46,10 +42,10 @@ export default function ProjectedBalanceBanner({
       </div>
 
       <div className="grid grid-cols-2 md:grid-cols-5 gap-3 text-sm">
-        <Cell label="رصيد آخر ملف" value={fmtNum(Math.round(snapshotTotal))} />
-        <Cell label="تاريخ آخر رصيد" value={snapshotDate || "—"} />
-        <Cell label="أيام منذ آخر رصيد" value={`${daysSince} يوم`} tone={stale ? "warn" : undefined} />
-        <Cell label="الرصيد المتوقع اليوم" value={fmtNum(Math.round(projectedTotal))} highlight />
+        <Cell label="سجلات الأصناف والمواقع" value={fmtNum(dataset.rows.length)} />
+        <Cell label="أقدم تاريخ رصيد مستخدم" value={snapshotDate || "—"} />
+        <Cell label="عمر أقدم رصيد" value={`${daysSince} يوم`} tone={stale ? "warn" : undefined} />
+        <Cell label="سجلات تحتاج مراجعة" value={fmtNum(dataset.rows.filter(r=>r.kind==='no_data').length)} highlight />
         <Cell label="درجة الثقة" value={CONFIDENCE_LABEL[conf]} />
       </div>
 
@@ -65,7 +61,7 @@ export default function ProjectedBalanceBanner({
 
       <div className="mt-3 text-xs text-muted-foreground flex items-center gap-1">
         <CalendarClock className="w-3 h-3" />
-        الحساب: رصيد آخر ملف − (متوسط الصرف اليومي × عدد الأيام) + الوارد − المنصرف ± التحويلات + المرتجعات
+        الرصيد المسجل منفصل عن التوقع. التوقع لا يخصم فوق المنصرف الفعلي، ولا تجمع أصنافًا بوحدات مختلفة. افتح الصنف لمراجعة التغطية المسجلة والمتوقعة.
       </div>
     </Card>
   );

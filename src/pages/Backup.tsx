@@ -11,6 +11,7 @@ import XLSX from "xlsx-js-style";
 import { buildUnifiedHeader } from "@/lib/excelReport";
 import { logAudit } from "@/lib/audit";
 import { canBackupRestore } from "@/lib/permissions";
+import {hasPermission} from '../../shared/accessPolicy';
 
 type BackupInfo = {
   lastBackupAt: string | null;
@@ -24,8 +25,8 @@ type BackupInfo = {
 const LS_KEY = "dawa_last_backup_at";
 
 export default function Backup() {
-  const { user, roles } = useAuth();
-  const isAdmin = canBackupRestore(roles);
+  const { user, roles,access } = useAuth();
+  const isAdmin = hasPermission(roles,access,'backup.export')&&(!access?.configured||access.all_branches&&hasPermission(roles,access,'data.warehouse')&&hasPermission(roles,access,'data.branches'));
   const [info, setInfo] = useState<BackupInfo | null>(null);
   const [busy, setBusy] = useState(false);
 
@@ -58,29 +59,30 @@ export default function Backup() {
     setBusy(true);
     try {
       const sb = supabase as any;
-      // اجلب الجداول الأساسية (حتى 10000 صف لكل)
+      // This is a paginated data export, not an authentication/storage/server backup.
       const tables = [
         "upload_batches", "inventory_movements", "stock_transactions",
         "item_master", "item_aliases", "active_ingredient_dictionary",
         "monthly_stock_movements", "recommendation_actions",
         "import_ignored_rows", "alerts", "transfers", "forecasts",
-        "data_quality_issues", "profiles", "user_roles", "locations",
+        "data_quality_issues", "profiles", "user_roles", "locations", "branch_reports", "branch_requests",
       ];
       const wb = XLSX.utils.book_new();
       const header = buildUnifiedHeader({
-        reportTitle: "نسخة احتياطية كاملة",
+        reportTitle: "تصدير بيانات - ليس نسخة استرجاع للخادم",
         source: "Lovable Cloud",
         user: user.email || user.id,
       });
       // ورقة فهرس
       const indexRows: any[][] = [["الجدول", "عدد الصفوف"]];
       for (const t of tables) {
-        const { data, error } = await sb.from(t).select("*").limit(10000);
-        if (error) {
-          indexRows.push([t, `خطأ: ${error.message}`]);
-          continue;
+        const rows: any[] = [];
+        for (let offset = 0; ; offset += 500) {
+          const { data, error } = await sb.from(t).select("*").order("id").range(offset, offset + 499);
+          if (error) throw new Error(`تعذر تصدير ${t}: ${error.message}`);
+          rows.push(...(data || []));
+          if (!data || data.length < 500) break;
         }
-        const rows = data || [];
         indexRows.push([t, rows.length]);
         if (!rows.length) continue;
         const cols = Object.keys(rows[0]);
@@ -96,9 +98,9 @@ export default function Backup() {
       const wsIndex = XLSX.utils.aoa_to_sheet([...header, ...indexRows]);
       XLSX.utils.book_append_sheet(wb, wsIndex, "فهرس");
       const stamp = new Date().toISOString().substring(0, 10);
-      XLSX.writeFile(wb, `نسخة-احتياطية-${stamp}.xlsx`);
+      XLSX.writeFile(wb, `تصدير-بيانات-${stamp}.xlsx`);
       localStorage.setItem(LS_KEY, new Date().toISOString());
-      toast.success("تم تصدير النسخة الاحتياطية");
+      toast.success("تم تصدير البيانات؛ هذه ليست نسخة استرجاع للخادم");
       await logAudit({
         userId: user.id,
         action: "backup_created",
@@ -132,7 +134,7 @@ export default function Backup() {
     <div className="p-6 space-y-4">
       <PageHeader
         title="النسخ الاحتياطي"
-        description="تصدير نسخة كاملة من بيانات النظام كملف Excel متعدد الأوراق. احتفظ بها في مكان آمن."
+        description="تصدير الجداول المتاحة لحسابك إلى Excel. نسخة الخادم القابلة للاسترجاع مسؤولية مالك قاعدة البيانات."
       />
 
       {warn && (
@@ -179,23 +181,23 @@ export default function Backup() {
 
       <Card className="p-6 space-y-4">
         <div>
-          <div className="font-bold text-lg mb-1">تصدير نسخة كاملة (Excel)</div>
+          <div className="font-bold text-lg mb-1">تصدير البيانات (Excel)</div>
           <div className="text-sm text-muted-foreground">
-            يصدّر ملف Excel يحتوي على ورقة لكل جدول رئيسي في النظام مع فهرس.
-            يُحفظ على جهازك مباشرة — احتفظ به في مكان آمن خارج الجهاز كذلك.
+            يصدّر الجداول مع فهرس دون حد 10000 صف. ليس لقطة ذرية أثناء تعديل المستخدمين للبيانات،
+            ولا يشمل كلمات مرور الدخول أو ملفات التخزين أو إعدادات الخادم. اطلب من مالك القاعدة نسخة استرجاع معتمدة.
           </div>
         </div>
         <div className="flex justify-end">
           <Button onClick={exportFullBackup} disabled={busy}>
             <Download className="w-4 h-4 ml-1" />
-            {busy ? "جارٍ التصدير…" : "تصدير نسخة احتياطية الآن"}
+            {busy ? "جارٍ التصدير…" : "تصدير البيانات الآن"}
           </Button>
         </div>
       </Card>
 
       <NextStep
         title="نصيحة"
-        description="بعد تصدير النسخة الاحتياطية، انقلها إلى ذاكرة خارجية أو خدمة سحابية (Google Drive / OneDrive)."
+        description="احفظ التصدير في مكان مؤمّن معتمد من المستشفى. لا ترفعه إلى حساب سحابي شخصي أو GitHub."
         to="/home"
         cta="رجوع لمركز التشغيل"
       />

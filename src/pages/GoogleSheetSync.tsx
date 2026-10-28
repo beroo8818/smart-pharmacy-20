@@ -1,4 +1,8 @@
 import { useMemo, useState } from "react";
+import {validateReportDates,todayISO,type ReportDates} from '../../shared/inventoryHistory';
+import ReportPeriodFields from '../../shared/components/ReportPeriodFields';
+import {hasPermission} from '../../shared/accessPolicy';
+import {notifyInventoryChanged} from '../../shared/inventoryRefresh';
 import * as XLSX from "xlsx";
 import PageHeader from "@/components/PageHeader";
 import { Card } from "@/components/ui/card";
@@ -165,13 +169,14 @@ function parseCsvText(text: string, defaultMonth: string | null): ParseResult {
 
 /* ---------- component ---------- */
 export default function GoogleSheetSync() {
-  const { user, hasRole } = useAuth();
+  const { user, hasRole,roles,access } = useAuth();
   const queryClient = useQueryClient();
-  const canSave = hasRole("system_admin") || hasRole("pharmacy_manager") || hasRole("warehouse_keeper") || hasRole("sub_pharmacist");
+  const canSave = hasPermission(roles,access,'data.upload');
 
   const [url, setUrl] = useState("");
   const [defaultMonth, setDefaultMonth] = useState<string>("");
   const [snapshotDate, setSnapshotDate] = useState<string>("");
+  const [reportDates,setReportDates]=useState<ReportDates>({});
   const [sourceLabel, setSourceLabel] = useState<string>("");
   const [csvText, setCsvText] = useState<string>("");
   const [syncedAt, setSyncedAt] = useState<Date | null>(null);
@@ -180,7 +185,7 @@ export default function GoogleSheetSync() {
   const [saved, setSaved] = useState<{ id: string; rows: number } | null>(null);
 
   const effectiveMonth = defaultMonth ? `${defaultMonth}-01` : null;
-  const effectiveSnapshot = snapshotDate || (defaultMonth ? lastDayOfMonth(defaultMonth) : null);
+  const effectiveSnapshot = snapshotDate || null;
   const result = useMemo<ParseResult | null>(
     () => (csvText ? parseCsvText(csvText, effectiveMonth) : null),
     [csvText, effectiveMonth],
@@ -188,7 +193,6 @@ export default function GoogleSheetSync() {
 
   function setDefaultMonthAndSnapshot(value: string) {
     setDefaultMonth(value);
-    setSnapshotDate(value ? lastDayOfMonth(value) : "");
   }
 
   async function syncFromUrl() {
@@ -233,29 +237,14 @@ export default function GoogleSheetSync() {
     if (!canSave) { toast.error("ليس لديك صلاحية الحفظ"); return; }
     if (!effectiveMonth) { toast.error("اختر الشهر الافتراضي قبل الحفظ"); return; }
     if (!effectiveSnapshot) { toast.error("اختر تاريخ الرصيد قبل الحفظ"); return; }
+    let dates:ReportDates;
+    try{dates=validateReportDates(effectiveMonth,effectiveSnapshot,'monthly',reportDates,todayISO(),true);}
+    catch(e){toast.error((e as Error).message);return;}
 
     setSaving(true);
     try {
       const fileName = `[google_sheet_csv] ${sourceLabel || "sheet.csv"}`.slice(0, 250);
-      const { data: batch, error: bErr } = await supabase
-        .from("upload_batches")
-        .insert({
-          file_name: fileName,
-          month: effectiveMonth,
-          rows_saved: 0,
-          rows_ignored: result.rejected,
-          issues_count: result.issuesCount,
-          status: "saving",
-          created_by: user.id,
-          snapshot_date: effectiveSnapshot,
-          batch_kind: "monthly",
-        })
-        .select("id")
-        .maybeSingle();
-      if (bErr || !batch?.id) throw new Error(bErr?.message || "فشل إنشاء الدفعة");
-
       const inserts = result.rows.map((r) => ({
-        upload_batch_id: batch.id,
         month: (r.month || effectiveMonth) as string,
         item_name: r.item_name,
         item_code: r.item_code,
@@ -271,14 +260,16 @@ export default function GoogleSheetSync() {
         created_by: user.id,
       }));
 
-      for (let i = 0; i < inserts.length; i += 500) {
-        const { error } = await supabase.from("inventory_movements").insert(inserts.slice(i, i + 500));
-        if (error) throw new Error(error.message);
-      }
-
-      await supabase.from("upload_batches")
-        .update({ rows_saved: inserts.length, status: "saved" })
-        .eq("id", batch.id);
+      if (inserts.some((row) => row.month !== effectiveMonth)) throw new Error("ارفع كل شهر في دفعة منفصلة؛ لا تجمع فترات مختلفة في تقرير واحد");
+      const payload = { file_name: fileName, month: effectiveMonth, snapshot_date: effectiveSnapshot, kind: "monthly", ...dates, rows: inserts };
+      let response = await supabase.rpc("hospital_operations" as any, { p_action: "save_import", p_payload: payload } as any);
+      if (!response.error && (response.data as any)?.requiresRevision && confirm((response.data as any).error + " هل تعتمد التصحيح؟")) response = await supabase.rpc("hospital_operations" as any, { p_action: "save_import", p_payload: { ...payload, confirm_revision: true } } as any);
+      if (response.error) throw new Error("تأكد من تطبيق ترقية قاعدة البيانات: " + response.error.message);
+      const saved = response.data as any;
+      if (!saved?.ok) throw new Error(saved?.error || "فشل الحفظ");
+      if (!saved.duplicate) notifyInventoryChanged();
+      const batch = { id: saved.batchId };
+      if (saved.duplicate) { setSaved({ id: batch.id, rows: inserts.length }); toast.info("البيانات مسجلة بالفعل؛ لم تتكرر"); return; }
 
       queryClient.invalidateQueries();
       setSaved({ id: batch.id, rows: inserts.length });
@@ -338,6 +329,7 @@ export default function GoogleSheetSync() {
               onChange={(e) => setSnapshotDate(e.target.value)}
             />
           </div>
+          <ReportPeriodFields month={effectiveMonth||''} kind="monthly" value={reportDates} onChange={setReportDates}/>
         </div>
       </Card>
 

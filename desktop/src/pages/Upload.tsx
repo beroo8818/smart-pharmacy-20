@@ -1,5 +1,8 @@
-import { previousMonth, numericValue, todayISO, validISODate } from "../../../shared/inventoryHistory";
+import { previousMonth, numericValue, todayISO, validISODate, validateReportDates, type ReportDates } from "../../../shared/inventoryHistory";
+import ReportPeriodFields from '../../../shared/components/ReportPeriodFields';
 import { useMemo, useState, useEffect } from "react";
+import {useAuth} from '@/hooks/useAuth';
+import {hasPermission} from '../../../shared/accessPolicy';
 import * as XLSX from "xlsx";
 import PageHeader from "@/components/PageHeader";
 import { Card } from "@/components/ui/card";
@@ -610,7 +613,8 @@ export default function UploadPage() {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
   const [searchParams] = useSearchParams();
-  const canSaveData = true; // الصلاحية تُفرض في طبقة الحفظ المحلية (saveBatch)
+  const {roles,access}=useAuth();
+  const canSaveData=hasPermission(roles,access,'data.upload');
 
   const [filename, setFilename] = useState("");
   const [file, setFile] = useState<File | null>(null);
@@ -629,6 +633,7 @@ export default function UploadPage() {
   const [mainStoreCol, setMainStoreCol] = useState<number | null>(null);
   const [analysisMode, setAnalysisMode] = useState<"current" | "all">("all");
   const [snapshotDate, setSnapshotDate] = useState<string>(""); // "YYYY-MM-DD"
+  const [reportDates,setReportDates]=useState<ReportDates>({});
   const [batchKind, setBatchKind] = useState<BatchKind>(
     searchParams.get("kind") === "weekly" ? "weekly_update" : "monthly",
   );
@@ -687,7 +692,7 @@ export default function UploadPage() {
   }, [filename]);
 
   const effectiveMonth = manualMonth ? `${manualMonth}-01` : null;
-  const effectiveSnapshot = snapshotDate || null;
+  const effectiveSnapshot = batchKind==='period_consumption' ? reportDates.issued_to||null : snapshotDate || null;
 
   function setManualMonthAndSnapshot(value: string) {
     setManualMonth(value);
@@ -857,7 +862,7 @@ export default function UploadPage() {
   async function handleFile(e: React.ChangeEvent<HTMLInputElement>) {
     const f = e.target.files?.[0];
     if (!f) return;
-    setFile(f); setFilename(f.name); setManualMonth(""); setSavedBatch(null);
+    setFile(f); setFilename(f.name); setManualMonth(""); setSavedBatch(null); setReportDates({});
     setAcceptedSuggestions(new Set()); setRowDecisions(new Map()); setRowEdits(new Map());
     setCurrentStep(1);
     const buf = await f.arrayBuffer();
@@ -865,7 +870,6 @@ export default function UploadPage() {
     const detectedSnapshot = extractSnapshotDateFromWorkbook(wb);
     const monthFromName = extractMonthFromFilename(f.name);
     if (detectedSnapshot) setSnapshotDate(detectedSnapshot);
-    else if (monthFromName) setSnapshotDate(lastDayOfMonth(monthFromName.substring(0, 7)));
     else setSnapshotDate("");
     if (detectedSnapshot) setManualMonth(previousMonth(detectedSnapshot));
     else if (monthFromName) setManualMonth(monthFromName.substring(0, 7));
@@ -892,6 +896,7 @@ export default function UploadPage() {
     setSheetNames(wb.SheetNames);
     setFilename("paste.csv");
     setSavedBatch(null);
+    setReportDates({});
     loadSheet(wb, wb.SheetNames[0]);
     setPasteOpen(false);
   }
@@ -899,7 +904,7 @@ export default function UploadPage() {
   function reset() {
     setAoa([]); setFilename(""); setFile(null); setWorkbook(null);
     setSheetNames([]); setActiveSheet(""); setManualMonth(""); setMainStoreCol(null);
-    setSavedBatch(null);
+    setSavedBatch(null); setReportDates({});
   }
 
   async function commit() {
@@ -908,6 +913,9 @@ export default function UploadPage() {
     if (!effectiveMonth) { toast.error("اختر الشهر قبل الحفظ"); return; }
     if (!effectiveSnapshot) { toast.error("اختر تاريخ الرصيد قبل الحفظ"); return; }
     if (!validISODate(effectiveSnapshot) || effectiveSnapshot > todayISO()) { toast.error("لا يمكن حفظ رصيد بتاريخ مستقبلي"); return; }
+    let dates: ReportDates;
+    try { dates=validateReportDates(effectiveMonth,effectiveSnapshot,batchKind,reportDates,todayISO(),true); }
+    catch(e){toast.error((e as Error).message);return;}
     if (analysisMode === "all" && workbook && importSheetNames.some((name) => detectStructure(XLSX.utils.sheet_to_json(workbook.Sheets[name], { header: 1, defval: null, raw: false }) as any[][]).mainStoreCandidates.length > 1)) {
       toast.error("يوجد أكثر من عمود محتمل للمخزن؛ اختر تحليل ورقة واحدة وحدد العمود قبل الحفظ"); return;
     }
@@ -929,9 +937,10 @@ export default function UploadPage() {
           month: (r.month || effectiveMonth) as string,
           issued_qty: batchKind === "monthly" || batchKind === "period_consumption" ? r.issued ?? null : null,
           closing_balance: batchKind === "period_consumption" ? null : r.closing ?? null,
+          received_qty: r.received ?? null,
         };
       });
-      const res = await api.upload.saveBatch({
+      let res = await api.upload.saveBatch({
         token: tokenStore.get(),
         fileName,
         month: effectiveMonth,
@@ -939,12 +948,15 @@ export default function UploadPage() {
         ignored: built.skipped + built.junk + tabIgnoredUser.length,
         snapshotDate: effectiveSnapshot,
         batchKind,
+        ...dates,
       });
+      if (res?.requiresRevision && confirm(res.error + " هل تعتمد هذا التصحيح؟")) res = await api.upload.saveBatch({ token: tokenStore.get(), fileName, month: effectiveMonth, rows, ignored: built.skipped + built.junk + tabIgnoredUser.length, snapshotDate: effectiveSnapshot, batchKind, ...dates, confirmRevision: true });
       if (!res || !res.ok) throw new Error((res && res.error) || "فشل حفظ البيانات");
       queryClient.invalidateQueries();
       const savedRows = res.rows ?? rows.length;
       setSavedBatch({ id: res.batchId, rows: savedRows, file: fileName, month: effectiveMonth });
-      toast.success(`تم حفظ ${savedRows} صف بنجاح في قاعدة البيانات`);
+      if (res.duplicate) toast.info("هذه البيانات مسجلة بالفعل؛ لم تتم إضافتها مرة ثانية");
+      else toast.success(`تم حفظ ${savedRows} صف بنجاح في قاعدة البيانات`);
     } catch (e: unknown) {
       console.error("commit() failed:", e);
       toast.error(e instanceof Error ? e.message : "فشل الرفع");
@@ -1123,8 +1135,8 @@ export default function UploadPage() {
           {/* Month picker */}
           {currentStep === 1 && (
           <Card className="p-5 mb-4">
-            <div className="font-bold mb-2">شهر المنصرف (مستقل عن تاريخ الرصيد)</div>
-            <p className="text-xs text-muted-foreground mb-3">الاقتراح الافتراضي هو الشهر السابق لتاريخ الرصيد. راجعه وعدله إذا كان الملف يخص فترة مختلفة.</p>
+            <div className="font-bold mb-2">شهر التقرير وفترة المنصرف بالأيام</div>
+            <p className="text-xs text-muted-foreground mb-3">اختر الشهر الحالي أو السابق، ثم حدد الأيام الفعلية. تاريخ الرصيد مستقل عن فترة المنصرف وتاريخ الرفع.</p>
             <div className="flex items-center gap-3 flex-wrap text-sm">
               <Input type="month" value={manualMonth} onChange={(e) => setManualMonthAndSnapshot(e.target.value)} className="max-w-[180px]" />
               {filenameMonth && (
@@ -1136,7 +1148,7 @@ export default function UploadPage() {
               {!manualMonth && <span className="text-warning text-xs">⚠ اختر الشهر — لا يمكن الحفظ بدونه.</span>}
             </div>
             <div className="flex items-center gap-3 flex-wrap text-sm mt-3 pt-3 border-t">
-              <label className="flex items-center gap-2">
+              <label className="flex items-center gap-2" hidden={batchKind==='period_consumption'}>
                 <span>تاريخ الرصيد (snapshot):</span>
                 <Input
                   type="date"
@@ -1152,7 +1164,7 @@ export default function UploadPage() {
                   onChange={(e) => setBatchKind(e.target.value as BatchKind)}
                   className="border rounded-md px-2 py-1 bg-background"
                 >
-                  <option value="monthly">ملف شهري كامل</option>
+                  <option value="monthly">رصيد ومنصرف فترة من الشهر</option>
                   <option value="full_snapshot">رصيد كامل في تاريخ محدد</option>
                   <option value="partial_update">تحديث جزئي لبعض الأصناف</option>
                   <option value="period_consumption">منصرف فترة فقط</option>
@@ -1160,9 +1172,10 @@ export default function UploadPage() {
                 </select>
               </label>
               <span className="text-xs text-muted-foreground">
-                تاريخ الرصيد إلزامي ومستقل. تحديث الرصيد لا يضيف شهر استهلاك جديدًا. المنصرف لفترة فقط لا يغيّر الرصيد.
+                تاريخ الرصيد مستقل للملفات التي تحتوي رصيدًا. تحديث الرصيد لا يضيف استهلاكًا، ومنصرف الفترة فقط لا يغيّر الرصيد.
               </span>
             </div>
+            <ReportPeriodFields month={effectiveMonth||''} kind={batchKind} value={reportDates} onChange={setReportDates} allowReceived />
           </Card>
           )}
 

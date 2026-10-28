@@ -342,4 +342,3 @@ BEGIN
  RETURN jsonb_build_object('ok',true,'locations',result,'completeScope',hospital_has_permission('data.hospital') AND hospital_has_permission('data.warehouse') AND hospital_has_permission('data.branches') AND coalesce((hospital_access()->>'all_branches')::boolean,false));
 END;$$;
 COMMIT;
-

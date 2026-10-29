@@ -14,6 +14,7 @@ CREATE FUNCTION auth.uid() RETURNS uuid LANGUAGE sql STABLE AS $$ SELECT nullif(
 CREATE TYPE public.app_role AS ENUM('system_admin','pharmacy_manager','sub_pharmacist','warehouse_keeper','viewer');
 CREATE TYPE public.location_type AS ENUM('main_warehouse','sub_pharmacy');
 CREATE TABLE locations(id uuid PRIMARY KEY DEFAULT gen_random_uuid(), name text NOT NULL, type location_type NOT NULL);
+CREATE TABLE item_master(id uuid PRIMARY KEY DEFAULT gen_random_uuid(),item_code text UNIQUE,normalized_item_key text NOT NULL,item_name_ar text,item_name_en text,trade_name text,active_ingredient_ar text,active_ingredient_en text,strength text,dosage_form text,unit text,ven_class text,is_active boolean NOT NULL DEFAULT true,created_at timestamptz NOT NULL DEFAULT now());
 CREATE TABLE profiles(id uuid PRIMARY KEY REFERENCES auth.users(id),name text DEFAULT '',email text,assigned_location_id uuid REFERENCES locations(id));
 CREATE TABLE user_roles(user_id uuid REFERENCES auth.users(id),role app_role,UNIQUE(user_id,role));
 CREATE FUNCTION has_role(u uuid,r app_role) RETURNS boolean LANGUAGE sql STABLE SECURITY DEFINER AS $$ SELECT EXISTS(SELECT 1 FROM user_roles WHERE user_id=u AND role=r) $$;
@@ -38,7 +39,7 @@ GRANT USAGE ON SCHEMA public,auth,storage TO authenticated;
 GRANT SELECT,INSERT,UPDATE,DELETE ON ALL TABLES IN SCHEMA public,storage TO authenticated;
 `;
 await db.exec(bootstrap);
-for (const table of ['locations','profiles','upload_batches','inventory_movements','stock_transactions','monthly_stock_movements','forecasts','alerts','transfers','recommendation_actions','audit_log','data_quality_issues','import_ignored_rows','uploads','storage.objects']) {
+for (const table of ['item_master','locations','profiles','upload_batches','inventory_movements','stock_transactions','monthly_stock_movements','forecasts','alerts','transfers','recommendation_actions','audit_log','data_quality_issues','import_ignored_rows','uploads','storage.objects']) {
   await db.exec(`ALTER TABLE ${table} ENABLE ROW LEVEL SECURITY; CREATE POLICY baseline_all ON ${table} FOR ALL TO authenticated USING(true) WITH CHECK(true);`);
 }
 const migration = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../supabase/migrations/20261028010000_branch_operations.sql');
@@ -57,6 +58,7 @@ await db.query('UPDATE profiles SET assigned_location_id=$1 WHERE id=$2',[ids.b,
 await db.exec(await fs.readFile(path.join(path.dirname(migration),'20261028040000_stock_reporting.sql'),'utf8'));
 await db.exec(await fs.readFile(path.join(path.dirname(migration),'20261028050000_user_permissions.sql'),'utf8'));
 await db.exec(await fs.readFile(path.join(path.dirname(migration),'20261028060000_recommendation_history.sql'),'utf8'));
+if(process.env.DAWA_CATALOG_FROM_START==='1')await db.exec(await fs.readFile(path.join(path.dirname(migration),'20261029010000_item_dictionary.sql'),'utf8'));
 await db.exec('SET ROLE authenticated');
 async function as(key) { await db.query("SELECT set_config('request.jwt.claim.sub',$1,false)",[ids[key]]); }
 async function call(action,payload={}) { return (await db.query('SELECT hospital_operations($1,$2::jsonb) AS result',[action,JSON.stringify(payload)])).rows[0].result; }
@@ -209,5 +211,37 @@ await db.query('INSERT INTO auth.users(id) VALUES($1)',[freshUser]);
 await db.query('INSERT INTO profiles(id,name) VALUES($1,$2)',[freshUser,'New account']);
 const basic=(await db.query('SELECT permissions,all_branches FROM user_access_profiles WHERE user_id=$1',[freshUser])).rows[0];
 ok(basic.permissions.includes('data.upload'));ok(!basic.permissions.includes('users.manage'));assert.equal(basic.all_branches,false);checks++;
+if(process.env.DAWA_CATALOG_FROM_START!=='1')await db.exec(await fs.readFile(path.join(path.dirname(migration),'20261029010000_item_dictionary.sql'),'utf8'));
+await db.exec('SET ROLE authenticated');await as('admin');
+const beforeDictionary=(await db.query('SELECT count(*) n FROM inventory_movements')).rows[0].n;
+const newDefinition={item_code:'NEW-DICT',item_name:'New training 200 mg tablet',unit:'tablet'};
+const created=await call('dictionary_create',newDefinition);ok(created.ok);assert.equal(created.item.item_code,newDefinition.item_code);checks++;
+assert.equal((await db.query('SELECT count(*) n FROM inventory_movements')).rows[0].n,beforeDictionary);checks++;
+ok((await call('dictionary_create',newDefinition)).duplicate);
+for(const override of [{unit:'box'},{item_name:'Incorrect name'},{item_code:'new-dict'}])await denies(()=>call('save_import',{...imported,rows:[{...imported.rows[0],item_code:newDefinition.item_code,item_name:newDefinition.item_name,unit:newDefinition.unit,...override}]}));
+await denies(()=>call('dictionary_create',{...newDefinition,unit:'box'}));
+await denies(()=>call('dictionary_create',{...newDefinition,item_name:'Changed name'}));
+await denies(()=>call('dictionary_create',{...newDefinition,item_code:'ANOTHER'}));
+await denies(()=>call('dictionary_create',{item_name:'Missing unit'}));
+await denies(()=>call('dictionary_create',{item_name:'Bad code',unit:'tablet',item_code:12}));
+await denies(()=>call('dictionary_create',{...newDefinition,balance:100}));
+const generated=await call('dictionary_create',{item_name:'Training vial 5 mg',unit:'vial'});ok(generated.item.item_code.startsWith('USR-'));
+ok((await call('dictionary_create',{item_name:'training  vial 5 mg',unit:'vial'})).duplicate);
+ok((await call('dictionary_list')).items.some(item=>item.item_code==='NEW-DICT'));
+ok((await call('overview')).catalog.some(item=>item.item_code==='NEW-DICT'));
+await denies(()=>db.query('SELECT hospital_access_dispatch_before_dictionary($1,$2)', ['dictionary_create',JSON.stringify(newDefinition)]));
+await denies(()=>db.query('SELECT * FROM hospital_dictionary_items()'));
+await denies(()=>db.query('SELECT dictionary_normalize($1)',['private helper']));
+const basicKeys=catalog.filter(p=>p.groups.includes('branch')).map(p=>p.key);
+ok((await call('access_save',{user_id:ids.bob,permissions:basicKeys,location_ids:[ids.b],all_branches:false})).ok);
+await as('bob');ok(!(await call('dictionary_list')).can_create);
+await denies(()=>call('dictionary_create',{item_name:'Unauthorized drug',unit:'tablet'}));
+const registeredReport=await call('submit',{location_id:ids.b,kind:'monthly',month:'2026-10-01',snapshot_date:'2026-10-29',snapshot_boundary:'end_of_day',issued_from:'2026-10-01',issued_to:'2026-10-15',rows:[{...newDefinition,balance:25,issued:75}]});ok(registeredReport.ok);
+const registeredMove=(await db.query('SELECT current_balance,issued_quantity FROM inventory_movements WHERE upload_batch_id=$1',[registeredReport.batchId])).rows[0];assert.deepEqual(registeredMove,{current_balance:'25',issued_quantity:'75'});checks++;
+await as('admin');ok((await call('access_save',{user_id:ids.bob,permissions:[...basicKeys,'dictionary.write'],location_ids:[ids.b],all_branches:false})).ok);
+await as('bob');ok((await call('dictionary_create',{item_name:'Delegated training 10 mg tablet',unit:'tablet'})).ok);
+await as('admin');ok((await call('access_save',{user_id:ids.bob,permissions:basicKeys,location_ids:[ids.b],all_branches:false})).ok);
+await as('bob');await denies(()=>call('dictionary_create',{item_name:'Revoked training definition',unit:'tablet'}));
+await db.exec('RESET ROLE');
 console.log(JSON.stringify({postgresChecks:checks,isolated:true,migrationCompiled:true}));
 await db.close();

@@ -46,6 +46,7 @@ export function detectBranchSheet(matrix:unknown[][],branchName:string,kind:stri
 }
 export function readBranchRows(matrix:unknown[][],format:BranchSheet,catalog:CatalogItem[],branchName:string,kind:string){
   const rows:OpsRow[]=[],issues:{row:number;message:string}[]=[],seen=new Map<string,OpsRow>();
+  const unknownItems:{row:number;item_code:string;item_name:string;unit:string}[]=[];
   let skipped=0,excluded=0,duplicates=0,ignoredIssues=0;
   const c=format.columns;
   if(matrix.length-format.dataStart>5000)throw new Error('الملف أكبر من 5000 صف؛ قسّمه إلى ملفات أصغر');
@@ -57,9 +58,10 @@ export function readBranchRows(matrix:unknown[][],format:BranchSheet,catalog:Cat
     if(kind==='period_consumption'?!has(at(c.issued)):!has(at(c.balance))&&(kind!=='monthly'||!has(at(c.issued)))){skipped++;continue;}
     const code=String(at(c.code)??'').trim(),name=norm(at(c.name)),unit=norm(at(c.unit));
     let found=catalog.filter(item=>code?norm(item.item_code)===norm(code):norm(item.item_name)===name);
+    const identityCount=found.length;
     found=found.filter(item=>norm(item.unit)===unit);
     const unique=[...new Map(found.map(item=>[`${item.item_code}|${item.unit}`,item])).values()];
-    if(unique.length!==1){issues.push({row:i+1,message:'الصنف أو الوحدة غير معروفين أو المطابقة غير فريدة؛ لا يتم التخمين أو تحويل الوحدات'});continue;}
+    if(unique.length!==1){issues.push({row:i+1,message:'الصنف أو الوحدة غير معروفين أو المطابقة غير فريدة؛ لا يتم التخمين أو تحويل الوحدات'});if(!identityCount&&name&&unit)unknownItems.push({row:i+1,item_code:code,item_name:String(at(c.name)).trim(),unit:String(at(c.unit)).trim()});continue;}
     const item=unique[0],row:OpsRow={...item,balance:kind==='period_consumption'?null:numericValue(at(c.balance)),issued:kind!=='partial_update'?numericValue(at(c.issued)):null};
     try{
       validateReport([row],kind);
@@ -70,5 +72,5 @@ export function readBranchRows(matrix:unknown[][],format:BranchSheet,catalog:Cat
     }catch(e){issues.push({row:i+1,message:(e as Error).message});}
   }
   if(!rows.length&&!issues.length)issues.push({row:format.dataStart+1,message:'لا توجد كميات للصيدلية المختارة في هذا الملف'});
-  return{rows,issues,skipped,excluded,duplicates,ignoredIssues};
+  return{rows,issues,skipped,excluded,duplicates,ignoredIssues,unknownItems};
 }

@@ -35,6 +35,19 @@ async function main() {
   ok(call(admin.token,'user_create',{username:'alice',name:'Alice',password:'test-only-alice',location_id:a}).ok);
   ok(call(admin.token,'user_create',{username:'bob',name:'Bob',password:'test-only-bob',location_id:b}).ok);
   const alice = auth.login({username:'alice',password:'test-only-alice'}), bob = auth.login({username:'bob',password:'test-only-bob'});
+  const countsBefore=db.prepare('SELECT count(*) n FROM inventory_movements').get().n;
+  const registered={item_code:'NEW-DICT',item_name:'New training 200 mg tablet',unit:'tablet'};
+  const definition=call(admin.token,'dictionary_create',registered);ok(definition.ok);
+  assert.equal(db.prepare('SELECT count(*) n FROM inventory_movements').get().n,countsBefore);assertions++;
+  ok(call(admin.token,'dictionary_create',registered).duplicate);
+  for(const input of [{...registered,unit:'box'},{...registered,item_name:'Changed name'},{...registered,item_code:'ANOTHER'},{item_name:'Missing unit'},{item_name:'Bad code',unit:'tablet',item_code:12},{...registered,balance:100}])ok(!call(admin.token,'dictionary_create',input).ok);
+  ok(!call(bob.token,'dictionary_create',{item_name:'Unauthorized medicine',unit:'tablet'}).ok);
+  ok(call(bob.token,'dictionary_list').items.some(item=>item.item_code==='NEW-DICT'));
+  ok(!call(bob.token,'dictionary_list').can_create);
+  const generated=call(admin.token,'dictionary_create',{item_name:'Training vial 5 mg',unit:'vial'});ok(generated.item.item_code.startsWith('USR-'));
+  ok(call(admin.token,'dictionary_create',{item_name:'training  vial 5 mg',unit:'vial'}).duplicate);
+  const registeredReport=call(bob.token,'submit',{location_id:b,kind:'monthly',month:'2026-10-01',snapshot_date:'2026-10-29',snapshot_boundary:'end_of_day',issued_from:'2026-10-01',issued_to:'2026-10-15',rows:[{...registered,balance:25,issued:75}]});ok(registeredReport.ok);
+  assert.deepEqual(db.prepare('SELECT closing_balance,issued_qty FROM inventory_movements WHERE upload_batch_id=?').get(registeredReport.batchId),{closing_balance:25,issued_qty:75});assertions++;
   const basic=call(bob.token,'access_self').access;
   ok(basic.configured);ok(basic.permissions.includes('data.upload'));ok(!basic.permissions.includes('users.manage'));ok(!basic.all_branches);
   ok(!auth.changePassword({token:alice.token,currentPassword:'wrong-password',newPassword:'new-test-only-alice'}).ok);
@@ -62,7 +75,7 @@ async function main() {
   ok(!upload.saveBatch({...initial,token:alice.token,branchSubmission:true,rows:[initial.rows[1]]}).ok);
   ok(!upload.saveBatch({...initial,token:alice.token,branchSubmission:true,rows:[{...initial.rows[0],item_code:'UNDEFINED'}]}).ok);
   ok(call(alice.token,'submit',form).duplicate);
-  assert.equal(call(bob.token,'overview').reports.length,0); assertions++;
+  assert.equal(call(bob.token,'overview').reports.filter(r=>r.location_id!==b).length,0); assertions++;
   const count = db.prepare('SELECT count(*) AS n FROM inventory_movements').get().n;
   ok(!call(alice.token,'review',{id:report.id,status:'approved',note:'test document'}).ok);
   assert.equal(db.prepare('SELECT count(*) AS n FROM inventory_movements').get().n,count); assertions++;
@@ -178,6 +191,10 @@ async function main() {
   assert.equal(call(admin.token,'recommendation_import_legacy',{rows:[{...legacy,to_location:'Unknown'}]}).errors.length,1);assertions++;
   ok(call(admin.token,'access_save',{user_id:bob.user.id,permissions:decisionPermissions.filter(p=>p!=='decisions.write'),location_ids:[b],all_branches:false}).ok);
   ok(!call(bob.token,'recommendation_save',{...decision,client_id:'revoked'}).ok);
+  ok(call(admin.token,'access_save',{user_id:bob.user.id,permissions:[...permissions,'dictionary.write'],location_ids:[b],all_branches:false}).ok);
+  ok(call(bob.token,'dictionary_create',{item_name:'Delegated training 10 mg tablet',unit:'tablet'}).ok);
+  ok(call(admin.token,'access_save',{user_id:bob.user.id,permissions,location_ids:[b],all_branches:false}).ok);
+  ok(!call(bob.token,'dictionary_create',{item_name:'Revoked training item',unit:'tablet'}).ok);
   const backup = await require('../ipc/backup.cjs').exportBackup({token:admin.token});
   assert.equal(backup.ok,true,JSON.stringify(backup));assertions++;
   const copy = new (require('better-sqlite3'))(backup.path,{readonly:true});
@@ -186,6 +203,8 @@ async function main() {
   assert.equal(copy.prepare('SELECT count(*) AS n FROM branch_requests').get().n,1);assertions++;
   assert.equal(copy.prepare("SELECT active FROM users WHERE username='alice'").get().active,0);assertions++;
   assert.equal(copy.prepare('SELECT count(*) n FROM active_ingredient_dictionary').get().n,1);assertions++;
+  assert.equal(copy.prepare("SELECT item_name_ar FROM item_master WHERE item_code='NEW-DICT'").get().item_name_ar,registered.item_name);assertions++;
+  assert.equal(copy.prepare('SELECT count(*) n FROM item_master WHERE item_code=?').get(generated.item.item_code).n,1);assertions++;
   assert.equal(copy.prepare('SELECT count(*) n FROM user_access_profiles').get().n,db.prepare('SELECT count(*) n FROM user_access_profiles').get().n);assertions++;
   assert.equal(copy.prepare('SELECT count(*) n FROM recommendation_actions').get().n,db.prepare('SELECT count(*) n FROM recommendation_actions').get().n);assertions++;
   copy.close();

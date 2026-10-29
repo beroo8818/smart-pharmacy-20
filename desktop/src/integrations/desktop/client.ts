@@ -147,7 +147,7 @@ export const api: Api = {...rawApi,
   stockTxn: {...rawApi.stockTxn, insert: inventoryWrite(args => rawApi.stockTxn.insert(args)), delete: inventoryWrite(args => rawApi.stockTxn.delete(args))},
   operations: {...rawApi.operations, call: async args => {
     const result = await rawApi.operations.call(args);
-    if (result?.ok && ['submit','access_save','assign','revoke','recommendation_save','recommendation_import_legacy'].includes(args.action) && !result.requiresRevision && !result.duplicate) notifyInventoryChanged();
+    if (result?.ok && ['submit','access_save','assign','revoke','recommendation_save','recommendation_import_legacy','dictionary_create'].includes(args.action) && !result.requiresRevision && !result.duplicate) notifyInventoryChanged();
     return result;
   }},
 };

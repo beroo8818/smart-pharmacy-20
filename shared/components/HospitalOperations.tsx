@@ -3,8 +3,9 @@ import { OPS_STATUS, validateReport, type OpsCall, type OpsOverview, type OpsRow
 import { previousMonth, todayISO, validateReportDates, type ReportDates } from "../inventoryHistory";
 import ReportPeriodFields from './ReportPeriodFields';
 import BranchExcelUpload from './BranchExcelUpload';
+import type {AccessProfile} from '../accessPolicy';
 
-type Overview = OpsOverview & { catalog: Pick<OpsRow, "item_code" | "item_name" | "unit">[] };
+type Overview = OpsOverview & { access?:AccessProfile;catalog: Pick<OpsRow, "item_code" | "item_name" | "unit">[] };
 const box = "border rounded-lg p-5 space-y-3 bg-card";
 const control = "border rounded p-2 bg-background w-full";
 const button = "border rounded px-4 py-2 bg-primary text-primary-foreground disabled:opacity-50";
@@ -84,7 +85,7 @@ export default function HospitalOperations({ call, local = false, access = false
           {kind!=='period_consumption'&&<label>تاريخ الرصيد<input className={control} type="date" max={todayISO()} value={snapshot} onChange={(e) => setSnapshot(e.target.value)} /></label>}
         </div>
         <ReportPeriodFields month={month+'-01'} kind={kind} value={reportDates} onChange={setReportDates}/>
-        <BranchExcelUpload catalog={data.catalog} branchName={selectedLocation?.name || ''} kind={kind} disabled={busy} onRows={(next)=>{setRows(next);setMessage(`تم تجهيز ${next.length} صنف من الملف؛ راجع الجدول ثم احفظ التحديث مباشرة`);setError('');}} />
+        <BranchExcelUpload catalog={data.catalog} branchName={selectedLocation?.name || ''} kind={kind} disabled={busy} createCall={data.access?.permissions.includes('dictionary.write')?call:undefined} onCatalogCreated={load} onRows={(next)=>{setRows(next);setMessage(`تم تجهيز ${next.length} صنف من الملف؛ راجع الجدول ثم احفظ التحديث مباشرة`);setError('');}} />
         <details className="border rounded p-3"><summary>إدخال يدوي اختياري</summary>
         <label>ابحث بالكود أو الاسم<input className={control} value={query} onChange={(e) => setQuery(e.target.value)} /></label>
         <label>الصنف والوحدة<select className={control} value={code} onChange={(e) => setCode(e.target.value)}><option value="">اختر الصنف</option>{catalog.map((r, i) => <option key={`${r.item_code}|${r.unit}|${i}`} value={`${r.item_code}|${r.unit}`}>{r.item_code} - {r.item_name} ({r.unit})</option>)}</select></label>

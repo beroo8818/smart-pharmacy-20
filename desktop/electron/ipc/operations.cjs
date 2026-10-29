@@ -11,6 +11,7 @@ function call({ token, action, payload: p = {} }) {
     const session = auth.getCurrentUser({ token });
     if (!session.ok) throw new Error("غير مسجل الدخول");
     const user = session.user, db = getDb(), manage = manager(user), location = assigned(user);
+    if(['dictionary_list','dictionary_create'].includes(action))return require('./itemDictionary.cjs').call(db,user,action,p);
     if(action==='local_table')return require('./localTables.cjs').call(user,p,token);
     if(action==='recommendation_list')return require('./recommendations.cjs').list(user,p);
     if(action==='recommendation_save')return require('./recommendations.cjs').save(user,p);

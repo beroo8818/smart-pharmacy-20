@@ -1,3 +1,5 @@
+import ItemDictionary from '../../shared/components/ItemDictionary';
+import {operationsCall} from '@/lib/operationsClient';
 import PageHeader from "@/components/PageHeader";
 import DataSourceCard from "@/components/DataSourceCard";
 import { Card } from "@/components/ui/card";
@@ -10,7 +12,7 @@ import {
 } from "@/lib/batchAnalysis";
 import { fmtNum } from "@/lib/format";
 
-export default function Dictionary() {
+function LatestUploadItems() {
   const [q, setQ] = useState("");
 
   const batchQ = useQuery({ queryKey: ["latest-batch-dict"], queryFn: fetchLatestBatch });
@@ -48,7 +50,7 @@ export default function Dictionary() {
 
   return (
     <div className="p-8 max-w-[1400px]">
-      <PageHeader title="قاموس الأصناف" description="كل الأصناف الموجودة في آخر ملف محفوظ مع المادة الفعالة والصيدليات." />
+      <PageHeader title="أصناف آخر ملف محفوظ" description="كل الأصناف الموجودة في آخر ملف محفوظ مع المادة الفعالة والصيدليات." />
       <DataSourceCard batch={batch} loading={loading} rowsCount={movements.length} />
 
       <Card className="p-5">
@@ -96,3 +98,5 @@ export default function Dictionary() {
     </div>
   );
 }
+
+export default function Dictionary(){return <><ItemDictionary call={operationsCall}/><details className="m-6 border rounded"><summary className="p-3 cursor-pointer">أصناف آخر ملف محفوظ وتحليلها</summary><LatestUploadItems/></details></>;}

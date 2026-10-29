@@ -3,6 +3,15 @@ const fixture=vi.hoisted(()=>({rpc:vi.fn()}));
 vi.mock('@/integrations/supabase/client',()=>({supabase:{rpc:fixture.rpc}}));
 import {operationsCall} from '../lib/operationsClient';
 afterEach(()=>{vi.restoreAllMocks();fixture.rpc.mockReset();});
+it('refreshes after creating a definition but not a catalog read, duplicate or denial',async()=>{
+ const listener=vi.fn();window.addEventListener('dawa-inventory-changed',listener);
+ try{
+  fixture.rpc.mockResolvedValue({data:{ok:true}});await operationsCall('dictionary_list');expect(listener).not.toHaveBeenCalled();
+  await operationsCall('dictionary_create');expect(listener).toHaveBeenCalledTimes(1);
+  fixture.rpc.mockResolvedValue({data:{ok:true,duplicate:true}});await operationsCall('dictionary_create');expect(listener).toHaveBeenCalledTimes(1);
+  fixture.rpc.mockResolvedValue({data:{ok:false,error:'denied'}});await expect(operationsCall('dictionary_create')).rejects.toThrow('denied');expect(listener).toHaveBeenCalledTimes(1);
+ }finally{window.removeEventListener('dawa-inventory-changed',listener);}
+});
 it('notifies after a committed branch update, not a confirmation, duplicate or read',async()=>{
   const listener=vi.fn();window.addEventListener('dawa-inventory-changed',listener);
   try{
@@ -26,5 +35,8 @@ it('desktop IPC publishes only successful committed writes',async()=>{
     await api.stockTxn.insert({token:'test',txn:{} as any});expect(listener).toHaveBeenCalledTimes(2);
     await api.operations.call({token:'test',action:'overview'});expect(listener).toHaveBeenCalledTimes(2);
     await api.operations.call({token:'test',action:'submit'});expect(listener).toHaveBeenCalledTimes(3);
+    await api.operations.call({token:'test',action:'dictionary_create'});expect(listener).toHaveBeenCalledTimes(4);
+    save.mockResolvedValueOnce({ok:true,duplicate:true} as any);await api.operations.call({token:'test',action:'dictionary_create'});expect(listener).toHaveBeenCalledTimes(4);
+    await api.operations.call({token:'test',action:'dictionary_list'});expect(listener).toHaveBeenCalledTimes(4);
   }finally{window.removeEventListener('dawa-inventory-changed',listener);delete window.api;}
 });

@@ -4,6 +4,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { supabase } from "@/integrations/supabase/client";
 import { fmtMonth, fmtNum } from "@/lib/format";
+import {PagedInventoryList} from '../../shared/components/TablePagination';
 import { useAuth } from "@/hooks/useAuth";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "@/hooks/use-toast";
@@ -487,7 +488,12 @@ export default function DailyActionCenter() {
     });
   }, [recs, q, prioFilter]);
 
-  const sec = (k: Rec["section"]) => filtered.filter((r) => r.section === k);
+  const bySection=useMemo(()=>{
+    const groups=new Map<Rec['section'],Rec[]>();
+    for(const row of filtered){const list=groups.get(row.section)||[];list.push(row);groups.set(row.section,list);}
+    return groups;
+  },[filtered]);
+  const sec = (k: Rec["section"]) => bySection.get(k)||[];
   const urgent = sec("urgent");
   const dispense = sec("main");
   const transfers = sec("transfer");
@@ -602,7 +608,7 @@ export default function DailyActionCenter() {
         {items.length === 0 ? (
           <div className="text-sm text-muted-foreground text-center py-6">{emptyText}</div>
         ) : (
-          <div className="grid gap-3">{items.map((r) => <RecCard key={r.id} r={r} />)}</div>
+          <PagedInventoryList items={items} render={r=><RecCard key={r.id} r={r}/>}/>
         )}
       </Card>
     );

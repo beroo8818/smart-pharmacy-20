@@ -1,6 +1,7 @@
 import {useCallback,useMemo,useState} from 'react';
 import {useLiveInventory} from '../useLiveInventory';
 import InventoryRefreshStatus from './InventoryRefreshStatus';
+import TablePagination,{usePagedRows} from './TablePagination';
 import {csvCell,type ReportStock} from '../operationalReports';
 import {todayISO} from '../inventoryHistory';
 const labels:Record<string,string>={critical:'خطر شديد',danger:'نقص متوقع',below:'أقل من الهدف',over:'زيادة',very_over:'زيادة كبيرة',deadstock:'بدون منصرف مسجل',no_data:'بيانات تحتاج مراجعة',safe:'ضمن الهدف'};
@@ -12,6 +13,7 @@ export default function StockAlerts({load,local=false,canExport=true}:{load:(opt
   const rows=useMemo(()=>(data?.rows||[]).map(r=>({...r,kind:basis==='projected'?r.projectedKind||'no_data':r.kind})),[data,basis]);
   const sites=[...new Set(rows.map(r=>r.locationName))].sort();
   const selected=useMemo(()=>rows.filter(r=>r.kind!=='safe'&&(kind==='all'||r.kind===kind)&&(site==='all'||r.locationName===site)&&`${r.itemName} ${r.itemCode||''} ${r.locationName}`.toLowerCase().includes(query.toLowerCase())),[rows,kind,site,query]);
+  const paging=usePagedRows(selected);
   const cell=(v:number|null|undefined)=>v==null?'غير متاح':v.toLocaleString('ar-EG',{maximumFractionDigits:1});
   const link=(path:string)=>(local?'#':'')+path;
   function exportRows(){const lines=[['تنبيهات المخزون',todayISO(),basis==='projected'?'حالة متوقعة تقديرية':'حالة حسب المسجل'],['آخر حساب ناجح',updatedAt?.toISOString()||''],['الصنف','الكود','الموقع','الوحدة','تاريخ الرصيد','الرصيد المسجل','الرصيد المتوقع','تغطية مسجلة','تغطية متوقعة','الحالة'],...selected.map(r=>[r.itemName,r.itemCode||'',r.locationName,r.unit||'',r.snapshotDate,r.hasBalance?r.balance:null,r.hasBalance?r.projectedBalance??null:null,r.days??null,r.projectedDays??null,labels[r.kind]||r.kind])];const url=URL.createObjectURL(new Blob(['\uFEFF'+lines.map(row=>row.map(csvCell).join(',')).join('\r\n')],{type:'text/csv;charset=utf-8'}));const a=document.createElement('a');a.href=url;a.download='stock-alerts-'+todayISO()+'.csv';a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);}
@@ -31,6 +33,7 @@ export default function StockAlerts({load,local=false,canExport=true}:{load:(opt
     <p className="text-sm">لا تجمع كميات أصناف أو وحدات مختلفة. اختلاف تواريخ الرصيد أو نقصه لا يعتبر أمانًا. التوقع لا يسجل حركة منصرف. عند وجود منصرف فعلي غير محدد التغطية الزمنية يتوقف الخصم التقديري لتجنب التكرار؛ راجع تفاصيل الصنف.</p>
     {error&&<p role="alert">{error}</p>}
     {canExport&&<button className="border rounded p-2" disabled={loading||!!error} onClick={exportRows}>تصدير التنبيهات إلى Excel عبر CSV</button>}
-    {loading?<p>جارٍ تحميل البيانات...</p>:!error&&<div className="overflow-auto"><table className="w-full text-sm"><thead><tr>{['الصنف','الموقع','تاريخ الرصيد','الرصيد المسجل','تغطية مسجلة (يوم)','تغطية متوقعة (يوم)','الحالة'].map(t=><th className="text-right border-b p-2" key={t}>{t}</th>)}</tr></thead><tbody>{selected.map(r=><tr key={r.key}><td className="border-b p-2"><a className="underline" href={link('/items/'+encodeURIComponent(r.itemKey))}>{r.itemName}</a><div>{r.itemCode} | {r.unit||'وحدة غير مؤكدة'}</div></td><td className="border-b p-2">{r.locationName}</td><td className="border-b p-2">{r.snapshotDate||'غير مسجل'}</td><td className="border-b p-2">{r.hasBalance?cell(r.balance):'غير مؤكد'}</td><td className="border-b p-2">{cell(r.days)}</td><td className="border-b p-2">{cell(r.projectedDays)}</td><td className="border-b p-2">{labels[r.kind]}<div>{r.ledgerWarnings?.join('؛ ')}</div></td></tr>)}</tbody></table>{!selected.length&&<p>لا توجد صفوف مطابقة للعرض؛ هذا لا يثبت اكتمال بيانات المستشفى.</p>}</div>}
+    {!loading&&!error&&<TablePagination {...paging}/>}
+    {loading?<p>جارٍ تحميل البيانات...</p>:!error&&<div className="overflow-auto"><table className="w-full text-sm"><thead><tr>{['الصنف','الموقع','تاريخ الرصيد','الرصيد المسجل','تغطية مسجلة (يوم)','تغطية متوقعة (يوم)','الحالة'].map(t=><th className="text-right border-b p-2" key={t}>{t}</th>)}</tr></thead><tbody>{paging.visible.map(r=><tr key={r.key}><td className="border-b p-2"><a className="underline" href={link('/items/'+encodeURIComponent(r.itemKey))}>{r.itemName}</a><div>{r.itemCode} | {r.unit||'وحدة غير مؤكدة'}</div></td><td className="border-b p-2">{r.locationName}</td><td className="border-b p-2">{r.snapshotDate||'غير مسجل'}</td><td className="border-b p-2">{r.hasBalance?cell(r.balance):'غير مؤكد'}</td><td className="border-b p-2">{cell(r.days)}</td><td className="border-b p-2">{cell(r.projectedDays)}</td><td className="border-b p-2">{labels[r.kind]}<div>{r.ledgerWarnings?.join('؛ ')}</div></td></tr>)}</tbody></table>{!selected.length&&<p>لا توجد صفوف مطابقة للعرض؛ هذا لا يثبت اكتمال بيانات المستشفى.</p>}</div>}
   </div>;
 }

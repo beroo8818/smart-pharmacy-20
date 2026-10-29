@@ -1,10 +1,9 @@
+import {formatNumber} from '../../shared/numberFormat';
+
 export const fmtNum = (n: number | null | undefined, digits = 0) =>
   n == null || isNaN(Number(n))
     ? "—"
-    : Number(n).toLocaleString("ar-EG", {
-        maximumFractionDigits: digits,
-        minimumFractionDigits: digits,
-      });
+    : formatNumber(Number(n),digits);
 
 export const fmtMonth = (d: string | Date) => {
   const date = typeof d === "string" ? new Date(d) : d;

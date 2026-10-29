@@ -14,7 +14,8 @@ function profile(user){
 }
 const has=(user,key)=>user.role==='system_admin'||profile(user).permissions.includes(key);
 function allowed(user,name,type){
- const p=profile(user);if(user.role==='system_admin')return true;
+ if(user.role==='system_admin')return true;
+ const p=profile(user);
  if(['main_store','main_warehouse'].includes(type))return p.permissions.includes('data.warehouse');
  if(!p.permissions.includes('data.branches'))return false;
  const loc=getDb().prepare("SELECT id FROM locations WHERE name=? AND type='sub_pharmacy' AND active=1").get(name||'');

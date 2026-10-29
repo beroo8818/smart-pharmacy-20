@@ -6,6 +6,9 @@ import * as history from "../../shared/inventoryHistory";
 import * as ledger from "../../shared/stockLedger";
 import {buildShortageReport} from '../../shared/shortageReports';
 import { planTransfers } from "../../shared/transferPlan";
+import {memoizeItem} from '../../shared/itemMemo';
+import {formatNumber} from '../../shared/numberFormat';
+import {selectAnalysisBatches} from '../../shared/analysisSource';
 import * as ingredients from "@/lib/activeIngredient";
 
 const fixture = vi.hoisted(() => ({ tables: {} as Record<string, any[]> }));
@@ -31,15 +34,14 @@ function pureModule(file: string, injection: Record<string, unknown> = {}) {
   return context.exports;
 }
 const desktopRules = pureModule("desktop/src/lib/statusRules.ts");
-const desktopAnalytics = pureModule("desktop/src/lib/desktopAnalytics.ts", { ...ingredients, ...history, ...desktopRules, isMainLoc: desktopRules.isMainLocation, planTransfers });
-const desktop = pureModule("desktop/src/lib/continuousAnalysis.ts", {
-  ...history, ...ledger, ...desktopAnalytics, tokenStore: { get: () => "test-only" },
-  api: { queries: {
-    listBatchesContinuous: async () => ({ ok: true, batches: fixture.tables.upload_batches }),
-    movementsByBatchIds: async ({ batchIds }: any) => ({ ok: true, movements: fixture.tables.inventory_movements.filter((m) => batchIds.includes(m.upload_batch_id))
-      .map((m) => ({ ...m, issued_qty: m.issued_quantity, closing_balance: m.current_balance, item_name_ar: m.item_name, item_name_en: m.trade_name, active_ingredient_ar: m.scientific_name })) }),
-  }, stockTxn: { list: async () => ({ ok: true, rows: fixture.tables.stock_transactions || [] }) } },
-});
+const desktopAnalytics = pureModule("desktop/src/lib/desktopAnalytics.ts", { ...ingredients, ...history, ...desktopRules, formatNumber,isMainLoc: desktopRules.isMainLocation, planTransfers });
+const desktopEngine=pureModule('desktop/src/lib/continuousEngine.ts',{...history,...ledger,...desktopAnalytics,memoizeItem});
+const desktop={loadContinuousAnalysis:async(opts:any)=>{
+  const selected=selectAnalysisBatches(fixture.tables.upload_batches,opts.asOf||history.todayISO(),opts.batchIds,'history');
+  const ids=new Set(selected.map(b=>b.id));
+  const movements=fixture.tables.inventory_movements.filter(m=>ids.has(m.upload_batch_id)).map(m=>({...m,issued_qty:m.issued_quantity,closing_balance:m.current_balance,item_name_ar:m.item_name,item_name_en:m.trade_name,active_ingredient_ar:m.scientific_name}));
+  return desktopEngine.computeContinuousAnalysis({selected,movements,txns:fixture.tables.stock_transactions||[],opts});
+}};
 const batch = (id: string, extra = {}) => ({ id, file_name: id, month: "2026-04-01", status: "saved", rows_saved: 1, created_at: "2026-05-01T10:00:00Z", snapshot_date: "2026-05-01", batch_kind: "monthly", ...extra });
 const movement = (id: string, upload_batch_id: string, extra = {}) => ({ id, upload_batch_id, month: "2026-04-01", item_code: "P500", item_name: "Paracetamol 500 mg tab", scientific_name: "Paracetamol 500 mg", trade_name: "Brand A", unit: "tab", location_name: "branch", location_type: "sub_pharmacy", issued_quantity: 300, current_balance: 100, ...extra });
 

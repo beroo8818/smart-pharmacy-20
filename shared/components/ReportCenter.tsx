@@ -1,6 +1,8 @@
 import { useMemo, useState } from "react";
 import {useLiveInventory} from '../useLiveInventory';
 import InventoryRefreshStatus from './InventoryRefreshStatus';
+import TablePagination,{usePagedRows} from './TablePagination';
+import {analysisSource} from '../analysisSource';
 import {reportingFreshness,type ReportingLocation} from '../reportingFreshness';
 const noFreshness=async()=>null;
 import { buildOperationalReport, csvCell, type ReportStock } from "../operationalReports";
@@ -9,6 +11,7 @@ import {buildShortageReport,type ShortageKind} from '../shortageReports';
 
 export const REPORT_TITLES: Record<string,string> = { balance: 'آخر رصيد مسجل', consumption: 'المنصرف الشهري الفعلي', shortages: 'الأصناف المهددة بالنفاد', quality: 'بيانات تحتاج مراجعة',hospital30:'المستشفى: أقل من 30 يومًا',warehouse30:'المخزن: أقل من 30 يومًا',warehouse14:'المخزن: أقل من 14 يومًا',zero_demand:'نافد مع استمرار الاحتياج',insufficient:'بيانات غير كافية لحساب التغطية' };
 const titles=REPORT_TITLES;
+const numberFormat=new Intl.NumberFormat('ar-EG',{maximumFractionDigits:2});
 export default function ReportCenter({ load,initialKind='balance',canExport=true,canPrint=true,local=false,loadFreshness }: { load: () => Promise<ReportStock[]>;initialKind?:string;canExport?:boolean;canPrint?:boolean;local?:boolean;loadFreshness?:()=>Promise<{locations:ReportingLocation[];completeScope:boolean}> }) {
   const {data,error,loading,updatedAt}=useLiveInventory(load);
   const freshness=useLiveInventory(loadFreshness||noFreshness);
@@ -22,11 +25,12 @@ export default function ReportCenter({ load,initialKind='balance',canExport=true
   const coverage=['hospital30','warehouse30','warehouse14','zero_demand','insufficient'].includes(kind);
   const coverageRows=useMemo(()=>coverage?buildShortageReport(rows,kind as ShortageKind,query,basis,completenessWarning):[],[rows,kind,query,coverage,basis,completenessWarning]);
   const columns=coverage?['الصنف','الكود','الموقع','الوحدة','تواريخ الرصيد',basis==='projected'?'الرصيد المتوقع - تقديري':'الرصيد المسجل','رصيد المخزن حسب الأساس','رصيد الفروع حسب الأساس','رصيد المستشفى حسب الأساس','متوسط يومي','متوسط شهري معياري 30 يومًا',basis==='projected'?'تغطية متوقعة (يوم)':'تغطية مسجلة (يوم)','الحد (يوم)','كمية استكمال الهدف، تقريب لأعلى','جودة البيانات']:['الصنف','الكود','الموقع','الوحدة',kind==='consumption'?'فترة المنصرف':'تاريخ الرصيد','الكمية','جودة البيانات'];
-  const values=coverage?coverageRows.map(r=>[r.item,r.code,r.location,r.unit,r.period,r.balance,r.warehouseBalance,r.branchesBalance,r.hospitalBalance,r.adc,r.monthlyNeed,r.days,r.threshold,r.needed,r.state]):records.map(r=>[r.item,r.code,r.location,r.unit,r.period,r.quantity,r.state]);
-  const sites = [...new Set(rows.map((r) => r.locationName))].sort();
+  const values=useMemo(()=>coverage?coverageRows.map(r=>[r.item,r.code,r.location,r.unit,r.period,r.balance,r.warehouseBalance,r.branchesBalance,r.hospitalBalance,r.adc,r.monthlyNeed,r.days,r.threshold,r.needed,r.state]):records.map(r=>[r.item,r.code,r.location,r.unit,r.period,r.quantity,r.state]),[coverage,coverageRows,records]);
+  const paging=usePagedRows(values);
+  const sites = useMemo(()=>[...new Set(rows.map((r) => r.locationName))].sort(),[rows]);
   function download() {
     if(!canExport)return;
-    const lines = [[titles[kind]], ['تاريخ استخراج التقرير',todayISO()],['آخر حساب ناجح',updatedAt?.toISOString()||''],['أساس الحساب',coverage&&basis==='projected'?'متوقع تقديري لليوم وليس حركة منصرف':'مسجل فعلي مع الحركات'], ['التغطية','المواقع والأصناف المتاحة لحساب المستخدم فقط؛ الغائب ليس صفرًا'], columns,...values];
+    const lines = [[titles[kind]], ['مصدر التحليل',analysisSource()==='latest_file'?'آخر ملف محفوظ فقط وحركات أصنافه؛ ليس كامل المستشفى':'كل الرفعات المحفوظة؛ آخر رصيد معروف لكل صنف وموقع'], ['تاريخ استخراج التقرير',todayISO()],['آخر حساب ناجح',updatedAt?.toISOString()||''],['أساس الحساب',coverage&&basis==='projected'?'متوقع تقديري لليوم وليس حركة منصرف':'مسجل فعلي مع الحركات'], ['التغطية','المواقع والأصناف المتاحة لحساب المستخدم فقط؛ الغائب ليس صفرًا'], columns,...values];
     const blob = new Blob(['\uFEFF' + lines.map((r) => r.map(csvCell).join(',')).join('\r\n')], { type:'text/csv;charset=utf-8' });
     const url = URL.createObjectURL(blob), a = document.createElement('a'); a.href=url; a.download=`hospital-${kind}-${todayISO()}.csv`; a.click(); setTimeout(() => URL.revokeObjectURL(url),1000);
   }
@@ -51,7 +55,8 @@ export default function ReportCenter({ load,initialKind='balance',canExport=true
       <p>اكتمال البيانات نسبي للأصناف والمواقع المعروفة، وليس إثباتًا بأن جميع صيدليات المستشفى أبلغت. لا تُجمع وحدات مختلفة، ولا تتحول القيم الغائبة إلى صفر.</p>
     </section>
     <div className="flex gap-3 print:hidden">{canExport&&<button className="border rounded p-2" disabled={loading || !!error} onClick={download}>تصدير CSV يفتح في Excel</button>}{canPrint&&<button className="border rounded p-2" disabled={loading || !!error} onClick={() => window.print()}>طباعة</button>}</div>
-    {loading ? <p>جارٍ تحميل البيانات...</p> : !error&&<div className="overflow-auto"><table className="w-full text-sm"><thead><tr>{columns.map(title=><th className="p-3 text-right border-b" key={title}>{title}</th>)}</tr></thead><tbody>{values.map((row,i)=><tr key={i}>{row.map((value,j)=><td key={j} className="p-3 border-b">{value==null?'غير متاح':typeof value==='number'?value.toLocaleString('ar-EG',{maximumFractionDigits:2}):value}</td>)}</tr>)}</tbody></table>{!values.length && <p className="p-5">لا توجد بيانات مطابقة. تحقق من الفترة والصلاحية، ولا تعتبر ذلك منصرفًا صفرًا.</p>}</div>}
+    {!loading&&!error&&<TablePagination {...paging}/>}
+    {loading ? <p>جارٍ تحميل البيانات...</p> : !error&&<div className="overflow-auto"><table className="w-full text-sm"><thead><tr>{columns.map(title=><th className="p-3 text-right border-b" key={title}>{title}</th>)}</tr></thead><tbody>{paging.visible.map((row,i)=><tr key={i}>{row.map((value,j)=><td key={j} className="p-3 border-b">{value==null?'غير متاح':typeof value==='number'?numberFormat.format(value):value}</td>)}</tr>)}</tbody></table>{!values.length && <p className="p-5">لا توجد بيانات مطابقة. تحقق من الفترة والصلاحية، ولا تعتبر ذلك منصرفًا صفرًا.</p>}</div>}
     <style>{'@media print { aside, nav { display:none !important; } main { overflow:visible !important; } table { border-collapse:collapse; } thead { display:table-header-group; } tr { break-inside:avoid; } }'}</style>
   </div>;
 }

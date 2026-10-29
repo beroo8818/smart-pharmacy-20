@@ -16,6 +16,7 @@ contextBridge.exposeInMainWorld("api", {
     setUserActive: call("auth:setUserActive"),
   },
   queries: {
+    inventoryRevision:call('queries:inventoryRevision'),
     latestBatch: call("queries:latestBatch"),
     listBatches: call("queries:listBatches"),
     movementsByBatch: call("queries:movementsByBatch"),

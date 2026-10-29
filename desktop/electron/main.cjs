@@ -172,6 +172,7 @@ function registerIpc() {
   ipcMain.handle("auth:setUserActive", (_e, a) => auth.setUserActive(a));
 
   ipcMain.handle("queries:latestBatch", (_e, a) => queries.getLatestSavedBatch(a));
+  ipcMain.handle("queries:inventoryRevision", (_e, a) => queries.getInventoryRevision(a));
   ipcMain.handle("queries:listBatches", (_e, a) => queries.listBatches(a));
   ipcMain.handle("queries:movementsByBatch", (_e, a) => queries.getMovementsByBatch(a));
   ipcMain.handle("queries:listBatchesContinuous", (_e, a) => queries.listBatchesContinuous(a));

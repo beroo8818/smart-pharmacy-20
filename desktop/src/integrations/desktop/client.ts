@@ -38,11 +38,12 @@ type Api = {
     setUserActive: (a: { token: string; userId: string; active: boolean }) => Promise<{ ok: boolean }>;
   };
   queries: {
+    inventoryRevision?: (a:{token:string})=>Promise<{ok:boolean;revision?:string}>;
     latestBatch: (a: { token: string }) => Promise<{ ok: boolean; batch: UploadBatch | null }>;
     listBatches: (a: { token: string }) => Promise<{ ok: boolean; batches: UploadBatch[] }>;
     movementsByBatch: (a: { token: string; batchId: string }) => Promise<{ ok: boolean; movements: Movement[] }>;
     listBatchesContinuous: (a: { token: string; limit?: number }) => Promise<{ ok: boolean; batches: UploadBatch[] }>;
-    movementsByBatchIds: (a: { token: string; batchIds: string[] }) => Promise<{ ok: boolean; movements: Movement[] }>;
+    movementsByBatchIds: (a: { token: string; batchIds: string[];compact?:boolean }) => Promise<{ ok: boolean; movements: Movement[] }>;
     listLocations: (a: { token: string }) => Promise<{ ok: boolean; locations: any[] }>;
     getSettings: () => Promise<{ ok: boolean; settings: Record<string, string> }>;
     setSetting: (a: { token: string; key: string; value: string }) => Promise<{ ok: boolean }>;

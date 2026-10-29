@@ -24,6 +24,7 @@ export function validISODate(value: string): boolean {
 }
 
 export function numericValue(value: unknown): number | null {
+  if(typeof value==='number')return Number.isFinite(value)?value===0?0:value:null;
   if (value == null || String(value).trim() === "") return null;
   const result = Number(String(value).replace(/[٠-٩]/g, (digit) => String("٠١٢٣٤٥٦٧٨٩".indexOf(digit)))
     .replace(/[,٬\s]/g, "").replace(/٫/g, "."));
@@ -149,18 +150,24 @@ export type ConsumptionPeriod = {
 export function buildInventoryHistory<T>(
   batches: HistoryBatch[], observations: HistoryObservation<T>[], monthsWindow: number, asOf: string,
 ): HistoryCell<T>[] {
-  const batchMap = new Map(batches.map((batch) => [batch.id, batch]));
+  const batchMap = new Map(batches.map(batch=>{
+    const snapshot=batch.snapshot_date||batch.month;
+    return [batch.id,{batch,snapshot,valid:validISODate(snapshot)&&snapshot<=asOf,
+      range:consumptionRange(batch,asOf),snapshotKey:snapshot+'|'+(batch.snapshot_boundary==='end_of_day'?'2':batch.snapshot_boundary==='start_of_day'?'0':'1')}] as const;
+  }));
+  const locations=new Map<string,string>();
   type Value = { sample: T; balance: number | null; issued: number | null; batch: HistoryBatch; from: string; to: string };
   type Sku = { snapshots: Map<string, Value>; periods: Map<string, Value> };
   const groups = new Map<string, { sample: T; locName: string; locType: string; skus: Map<string, Sku> }>();
   const saved = (batch: HistoryBatch) => batch.uploaded_at || batch.created_at || "";
   const later = (a: HistoryBatch, b: HistoryBatch) => saved(a).localeCompare(saved(b)) || a.id.localeCompare(b.id);
   for (const observation of observations) {
-    const batch = batchMap.get(observation.batchId);
-    if (!batch) continue;
-    const snapshot = batch.snapshot_date || batch.month;
-    if (!validISODate(snapshot) || snapshot > asOf) continue;
-    const key = `${observation.item}|${locationKey(observation.locationName, observation.locationType)}`;
+    const metadata = batchMap.get(observation.batchId);
+    if (!metadata?.valid) continue;
+    const {batch,range,snapshotKey}=metadata;
+    const location=JSON.stringify([observation.locationName,observation.locationType]);
+    if(!locations.has(location))locations.set(location,locationKey(observation.locationName,observation.locationType));
+    const key = `${observation.item}|${locations.get(location)}`;
     let group = groups.get(key);
     if (!group) {
       group = { sample: observation.sample, locName: observation.locationName, locType: observation.locationType, skus: new Map() };
@@ -170,10 +177,8 @@ export function buildInventoryHistory<T>(
     if (!sku) { sku = { snapshots: new Map(), periods: new Map() }; group.skus.set(observation.sku, sku); }
     const balance = numericValue(observation.balance);
     const issued = numericValue(observation.issued);
-    const range = consumptionRange(batch, asOf);
     const value: Value = { sample: observation.sample, balance, issued, batch, from: range?.from || '', to: range?.to || '' };
     if (batch.batch_kind !== "period_consumption" && balance != null) {
-      const snapshotKey = snapshot + '|' + (batch.snapshot_boundary === 'end_of_day' ? '2' : batch.snapshot_boundary === 'start_of_day' ? '0' : '1');
       const old = sku.snapshots.get(snapshotKey);
       if (!old || later(batch, old.batch) > 0) sku.snapshots.set(snapshotKey, value);
       else if (old.batch.id === batch.id) old.balance = (old.balance ?? 0) + balance;

@@ -1,4 +1,5 @@
 import { planTransfers } from "../../../shared/transferPlan";
+import {formatNumber} from '../../../shared/numberFormat';
 import { locationKey, monthDays, numericValue, movementPeriodDays } from "../../../shared/inventoryHistory";
 
 import type { Movement, UploadBatch } from "@/integrations/desktop/client";
@@ -48,7 +49,7 @@ export function num(v: unknown) {
 }
 
 export function fmtNum(v: unknown, digits = 0) {
-  return num(v).toLocaleString("ar-EG", { maximumFractionDigits: digits, minimumFractionDigits: digits });
+  return formatNumber(num(v),digits);
 }
 
 export function fmtMonth(m?: string | null) {

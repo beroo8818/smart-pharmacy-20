@@ -17,6 +17,7 @@ await fs.copyFile(path.join(repo,'docs','windows-delivery.ar.md'),path.join(dest
 await fs.copyFile(path.join(repo,'docs','network-handoff.ar.md'),path.join(destination,'NETWORK-ar.txt'));
 await fs.copyFile(path.join(repo,'docs','screen-parity.ar.md'),path.join(destination,'SCREENS-ar.txt'));
 await fs.copyFile(path.join(repo,'docs','item-dictionary.ar.md'),path.join(destination,'NEW-ITEMS-ar.txt'));
+await fs.copyFile(path.join(repo,'docs','performance.ar.md'),path.join(destination,'PERFORMANCE-ar.txt'));
 await fs.copyFile(path.join(root,'output','pdf','dawa-workflows-ar.pdf'),path.join(destination,'Dawa-Guide-ar.pdf'));
 async function verify(dir){
  for(const entry of await fs.readdir(dir,{withFileTypes:true})){

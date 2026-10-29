@@ -1,4 +1,5 @@
 import { useCallback, useMemo, useState } from "react";
+import {PagedInventoryList} from '../../../shared/components/TablePagination';
 import {useAuth} from '@/hooks/useAuth';
 import {hasPermission} from '../../../shared/accessPolicy';
 import {loadNativeActions,latestDecisions} from '../../../shared/recommendationActions';
@@ -233,7 +234,12 @@ export default function DailyActionCenter() {
     });
   }, [recs, q, prioFilter]);
 
-  const sec = (k: Rec["section"]) => filtered.filter((r) => r.section === k);
+  const bySection=useMemo(()=>{
+    const groups=new Map<Rec['section'],Rec[]>();
+    for(const row of filtered){const list=groups.get(row.section)||[];list.push(row);groups.set(row.section,list);}
+    return groups;
+  },[filtered]);
+  const sec = (k: Rec["section"]) => bySection.get(k)||[];
   const sections: { key: Rec["section"]; title: string }[] = [
     { key: "urgent", title: "نقص عاجل (< 7 أيام)" },
     { key: "main", title: "اصرف من المخزن" },
@@ -316,7 +322,7 @@ export default function DailyActionCenter() {
             return (
               <section key={s.key} className="space-y-2">
                 <h2 className="text-lg font-bold">{s.title} <span className="text-sm text-muted-fg">({list.length})</span></h2>
-                <div className="grid md:grid-cols-2 gap-3">{list.map((r) => <RecCard key={r.id} r={r} />)}</div>
+                <PagedInventoryList items={list} className="grid md:grid-cols-2 gap-3" render={r=><RecCard key={r.id} r={r}/>}/>
               </section>
             );
           })}

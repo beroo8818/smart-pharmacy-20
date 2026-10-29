@@ -30,9 +30,16 @@ export function applyStockLedger<T>(input: HistoryCell<T>[], transactions: Ledge
   const templates = new Map(cells.map(c => [itemKey(c.sample),c]));
   const aliasMap = new Map<string,string>();
   const ambiguous = new Set<string>();
-  for (const sample of [...input.map(c=>c.sample),...samples]) for (const alias of [...aliases(sample),itemKey(sample)]) {
-    const key=normalize(alias), canonical=itemKey(sample), old=aliasMap.get(key);
-    if(old && old!==canonical) ambiguous.add(key); else aliasMap.set(key,canonical);
+  const candidates=new Map<string,Set<string>>(),seenAliases=new Map<string,Set<string[]>>();
+  for (const sample of [...input.map(c=>c.sample),...samples]) {
+    const canonical=itemKey(sample),names=aliases(sample),seen=seenAliases.get(canonical)||new Set<string[]>();
+    if(seen.has(names))continue;
+    seen.add(names);seenAliases.set(canonical,seen);
+    for(const alias of [...names,canonical]){
+      const key=normalize(alias),old=aliasMap.get(key),items=candidates.get(key)||new Set<string>();
+      items.add(canonical);candidates.set(key,items);
+      if(old && old!==canonical) ambiguous.add(key); else aliasMap.set(key,canonical);
+    }
   }
   const adjustments = new Map<string,StockAdjustments>();
   const warnings = new Map<string,Set<string>>();
@@ -44,7 +51,7 @@ export function applyStockLedger<T>(input: HistoryCell<T>[], transactions: Ledge
     if (!validISODate(txn.txn_date) || txn.txn_date>asOf) continue;
     const raw=normalize(txn.item_code||txn.item_key||txn.item_name);
     if(ambiguous.has(raw)){
-      const affected = new Set([...input.map(c=>c.sample),...samples].filter(sample=>[...aliases(sample),itemKey(sample)].some(alias=>normalize(alias)===raw)).map(itemKey));
+      const affected = candidates.get(raw)!;
       for(const c of cells) if(affected.has(itemKey(c.sample))) warn(ledgerCellKey(itemKey(c.sample),c.locName,c.locType),'تعريف الصنف في الحركة ملتبس بين مجموعات مختلفة؛ لم تطبق الكمية');
       continue;
     }

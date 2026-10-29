@@ -5,9 +5,16 @@ export const INVENTORY_CHANGE_KEY = 'dawa-inventory-change';
 const CHANGE_EVENT = 'dawa-inventory-changed';
 const listeners = new Set<() => void>();
 let stop: (() => void) | undefined;
+let writeRevision=0;
+
+export function inventoryDataVersion(){
+  try{return `${writeRevision}|${localStorage.getItem(INVENTORY_CHANGE_KEY)||''}`;}
+  catch{return String(writeRevision);}
+}
 
 // Only an invalidation marker is shared between tabs, never stock or user data.
 export function notifyInventoryChanged() {
+  writeRevision++;
   if (typeof window === 'undefined') return;
   window.dispatchEvent(new Event(CHANGE_EVENT));
   try { localStorage.setItem(INVENTORY_CHANGE_KEY, `${Date.now()}-${Math.random()}`); } catch { /* Local events still work when storage is unavailable. */ }

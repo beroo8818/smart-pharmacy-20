@@ -1,6 +1,15 @@
 const { getDb } = require("../db/sqlite.cjs");
 const { getCurrentUser } = require("./auth.cjs");
 const { visible, assigned, manager } = require("./access.cjs");
+function visibleMovements(user,rows){
+  // Permission checks are stable within this read, not cached across requests.
+  const locations=new Map();
+  return rows.filter(row=>{
+    const key=JSON.stringify([row.location_name,row.location_type]);
+    if(!locations.has(key))locations.set(key,visible(user,row.location_name,row.location_type));
+    return locations.get(key);
+  });
+}
 function scopedBatches(user, rows) {
   const rights=require('./rights.cjs'),p=rights.profile(user);
   if(user.role==='system_admin'||p.all_branches&&rights.has(user,'data.warehouse')&&rights.has(user,'data.branches'))return rows;
@@ -13,6 +22,18 @@ function requireAuth(tk) {
   const c = getCurrentUser({ token: tk });
   if (!c.ok) throw new Error("غير مسجل الدخول");
   return c.user;
+}
+
+let revisionDb,revisionSalt,connectionId=0;
+function getInventoryRevision({token}){
+  requireAuth(token);
+  const db=getDb();
+  if(db!==revisionDb){revisionDb=db;connectionId++;}
+  const crypto=require('node:crypto');
+  if(!revisionSalt)revisionSalt=crypto.randomUUID();
+  const changes=db.prepare('SELECT total_changes() n').get().n;
+  const external=db.pragma('data_version',{simple:true});
+  return {ok:true,revision:crypto.createHash('sha256').update(JSON.stringify([revisionSalt,connectionId,changes,external])).digest('hex')};
 }
 
 function getLatestSavedBatch({ token: tk }) {
@@ -46,7 +67,7 @@ function getMovementsByBatch({ token: tk, batchId }) {
        ORDER BY i.item_name_ar, l.name`
     )
     .all(batchId);
-  return { ok: true, movements: rows.filter((row) => visible(user, row.location_name, row.location_type)) };
+  return { ok: true, movements: visibleMovements(user,rows) };
 }
 
 function listBatchesContinuous({ token: tk, limit }) {
@@ -63,7 +84,8 @@ function listBatchesContinuous({ token: tk, limit }) {
   return { ok: true, batches: scopedBatches(user, rows) };
 }
 
-function getMovementsByBatchIds({ token: tk, batchIds }) {
+function getMovementsByBatchIds({ token: tk, batchIds, compact=false }) {
+  if(compact)return require('./analysisRead.cjs').read({token:tk,batchIds});
   const user = requireAuth(tk);
   if (!Array.isArray(batchIds) || !batchIds.length) return { ok: true, movements: [] };
   const db = getDb();
@@ -79,7 +101,7 @@ function getMovementsByBatchIds({ token: tk, batchIds }) {
        JOIN locations  l ON l.id = m.location_id
        WHERE m.upload_batch_id IN (${placeholders})`
     ).all(...batchIds);
-  return { ok: true, movements: rows.filter((row) => visible(user, row.location_name, row.location_type)) };
+  return { ok: true, movements: visibleMovements(user,rows) };
 }
 
 function listLocations({ token: tk }) {
@@ -112,6 +134,7 @@ function setSetting({ token: tk, key, value }) {
 }
 
 module.exports = {
+  getInventoryRevision,
   getLatestSavedBatch, listBatches, getMovementsByBatch,
   listBatchesContinuous, getMovementsByBatchIds,
   listLocations, getSettings, setSetting,

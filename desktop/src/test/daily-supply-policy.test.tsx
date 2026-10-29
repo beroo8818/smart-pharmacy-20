@@ -1,0 +1,12 @@
+import {afterEach,beforeEach,expect,it,vi} from 'vitest';
+import {cleanup,render,screen} from '@testing-library/react';
+const fixture=vi.hoisted(()=>({balance:300}));
+vi.mock('@/hooks/useAuth',()=>({useAuth:()=>({roles:['system_admin'],access:null})}));
+vi.mock('@/lib/continuousAnalysis',()=>({loadContinuousAnalysis:vi.fn()}));
+vi.mock('@/lib/operationsClient',()=>({operationsCall:vi.fn()}));
+vi.mock('@/components/ItemIdentity',()=>({default:({name}:any)=><span>{name}</span>}));
+vi.mock('../../../shared/useLiveInventory',()=>({useLiveInventory:()=>({loading:false,error:'',data:{latestBatch:{id:'batch',month:'2026-09-01',file_name:'Training fixture'},preliminary:false,decisions:{},rows:[{itemKey:'T1',itemName:'Training medicine',itemCode:'T1',tradeNames:[],unit:'tablet',locationName:'Branch A',locationType:'sub_pharmacy',balance:0,issued:300,adc:10,days:0,kind:'critical'},{itemKey:'T1',itemName:'Training medicine',itemCode:'T1',tradeNames:[],unit:'tablet',locationName:'Warehouse',locationType:'main_warehouse',balance:fixture.balance,issued:300,adc:10,days:fixture.balance/10,kind:'safe'}]}})}));
+import DailyActionCenter from '@/pages/DailyActionCenter';
+beforeEach(()=>{fixture.balance=300;});afterEach(cleanup);
+it('separates a blocked distribution from the hospital-wide shortage',()=>{render(<DailyActionCenter/>);expect(screen.getByText(/الرصيد الإجمالي يغطي الهدف، لكن بعض الفروع/)).toBeTruthy();});
+it('does not claim blocked distribution when the suggested allocation fully covers branch demand',()=>{fixture.balance=600;render(<DailyActionCenter/>);expect(screen.queryByText(/الرصيد الإجمالي يغطي الهدف، لكن بعض الفروع/)).toBeNull();expect(screen.getByText(/اصرف ٣٠٠/)).toBeTruthy();});

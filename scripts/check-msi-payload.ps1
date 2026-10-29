@@ -1,14 +1,14 @@
-param([Parameter(Mandatory=$true)][string]$TaskRoot)
+param([Parameter(Mandatory=$true)][string]$TaskRoot,[string]$Version='1.1.0')
 $ErrorActionPreference='Stop'
 $root=(Resolve-Path -LiteralPath $TaskRoot).Path
-$release=Join-Path $root 'output\windows-1.1.0'
+$release=Join-Path $root ('output\windows-'+$Version)
 $wix=Join-Path $root 'work\builder-cache\wix\wix-4.0.0.5512.2'
 $zip=Join-Path $root 'work\shelf-stock-sense\desktop\node_modules\7zip-bin\win\x64\7za.exe'
 $expected=Join-Path $release 'win-unpacked'
 $out=Join-Path $root ('work\verification\msi-payload-'+[guid]::NewGuid().ToString('N'))
 [void][System.IO.Directory]::CreateDirectory($out)
 [void][System.Reflection.Assembly]::LoadFrom((Join-Path $wix 'WixToolset.Dtf.WindowsInstaller.dll'))
-$db=[WixToolset.Dtf.WindowsInstaller.Database]::new((Join-Path $release 'Dawa-Setup-1.1.0-x64.msi'),[WixToolset.Dtf.WindowsInstaller.DatabaseOpenMode]::ReadOnly)
+$db=[WixToolset.Dtf.WindowsInstaller.Database]::new((Join-Path $release ('Dawa-Setup-'+$Version+'-x64.msi')),[WixToolset.Dtf.WindowsInstaller.DatabaseOpenMode]::ReadOnly)
 $cabCount=0
 try{
  $view=$db.OpenView('SELECT Name,Data FROM _Streams',@());$view.Execute()

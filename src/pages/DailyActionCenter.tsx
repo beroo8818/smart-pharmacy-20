@@ -27,6 +27,7 @@ import { logAudit } from "@/lib/audit";
 import {hasPermission} from '../../shared/accessPolicy';
 import {notifyInventoryChanged} from '../../shared/inventoryRefresh';
 import {fetchPagedRows} from '@/lib/pagedQuery';
+import {hospitalPurchaseQuantity} from '../../shared/supplyPolicy';
 
 const db = supabase as any;
 
@@ -404,22 +405,19 @@ export default function DailyActionCenter() {
 
       // section: request supply / purchase (Rule 4 — hospital total below target)
       if (unmetTotal > 0) {
-        const orderQty = Math.max(
-          unmetTotal,
-          Math.ceil(Math.max(0, totalBranchAdc * target - hospitalBalanceStart)),
-        );
-        out.push({
+        const orderQty = hospitalPurchaseQuantity(hospitalBalanceStart,totalBranchAdc,target);
+        if(orderQty!=null&&orderQty>0)out.push({
           id: `po:${recItemKey}`,
           section: "purchase",
           itemKey: recItemKey, itemName, tradeNames: recTradeNames, itemCode, unit:itemSample.unit,
           to: unmetBranches.length === 1 ? unmetBranches[0] : "المستشفى",
           problem:
-            `نقص على مستوى المستشفى: لا يوجد رصيد كافٍ بالمخزن الرئيسي ولا فائض بالفروع لتغطية ${unmetBranches.join("، ")}.`,
+            `عجز في إجمالي المستشفى للوصول إلى الهدف؛ راجع أيضًا توزيع الرصيد إلى ${unmetBranches.join("، ")}.`,
           action: `اطلب توريد حوالي ${fmtNum(orderQty)} وحدة لتغطية ${target} يوم.`,
           why:
             `رصيد المستشفى الكلي ${fmtNum(hospitalBalanceStart)} ÷ متوسط صرف الفروع ${fmtNum(totalBranchAdc, 2)}/يوم = ` +
             `${hospitalCoverageStart == null ? "—" : hospitalCoverageStart.toFixed(0)} يوم تغطية، والهدف ${target} يوم. ` +
-            `العجز غير المغطى داخليًا = ${fmtNum(unmetTotal)} وحدة.`,
+            `فجوة إجمالي الهدف = ${fmtNum(orderQty)} وحدة. احتياج الفروع غير الموزع ${fmtNum(unmetTotal)} وقد يتضمن قيود احتياطي المخزن؛ لا يضاف مرة ثانية إلى طلب التوريد.`,
           priority: computePriority({
             days: mostUrgentUnmetDays,
             kind: "below",
@@ -430,6 +428,7 @@ export default function DailyActionCenter() {
           qty: orderQty,
           kind: "request_supply",
         });
+        else if(orderQty===0)out.push({id:`reserve:${recItemKey}`,section:'review',itemKey:recItemKey,itemName,tradeNames:recTradeNames,itemCode,unit:itemSample.unit,to:unmetBranches[0],problem:'الرصيد الإجمالي يغطي الهدف، لكن بعض الفروع ما زالت ناقصة بسبب التوزيع أو احتياطي المخزن.',action:'راجع أولوية توزيع الرصيد وسياسة الاحتياطي؛ لا تطلب شراء إضافيًا لمجرد تعذر التوزيع.',why:`إجمالي الرصيد ${fmtNum(hospitalBalanceStart)} واحتياج الهدف ${fmtNum(totalBranchAdc*target)}. لم يتغير احتياطي المخزن أو هدف التغطية.`,priority:computePriority({days:mostUrgentUnmetDays,targetDays:target,isVital:isVital(itemCode,itemName)}),kind:'review_reserve_policy'});
       }
 
       // section 4: do not order
@@ -615,6 +614,7 @@ export default function DailyActionCenter() {
         title="مركز العمل اليومي"
         description="تحليل الرصيد المسجل والحركات الفعلية. تسجيل القرار كمنفذ لا يحرك المخزون؛ سجل الحركة الفعلية مرة واحدة."
       />
+      <p className="mb-4 text-sm text-muted-foreground">إجمالي المستشفى = المخزن + الفروع. احتياطي المخزن الحالي قيد على اقتراح التوزيع فقط؛ لا يضاف مرة ثانية إلى احتياج شراء المستشفى.</p>
 
       {preliminary && (
         <div className="mb-4 px-4 py-2 rounded-md border border-amber-500/40 bg-amber-500/10 text-amber-700 dark:text-amber-300 text-sm">

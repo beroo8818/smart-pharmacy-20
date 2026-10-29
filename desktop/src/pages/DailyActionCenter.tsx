@@ -4,6 +4,7 @@ import {hasPermission} from '../../../shared/accessPolicy';
 import {loadNativeActions,latestDecisions} from '../../../shared/recommendationActions';
 import {operationsCall} from '@/lib/operationsClient';
 import {useLiveInventory} from '../../../shared/useLiveInventory';
+import {hospitalPurchaseQuantity} from '../../../shared/supplyPolicy';
 import { api, tokenStore, type UploadBatch } from "@/integrations/desktop/client";
 import { fmtMonth, fmtNum, isMainLocation, type AnalysisRow } from "@/lib/desktopAnalytics";
 import { loadContinuousAnalysis, type ProjectedRow } from "@/lib/continuousAnalysis";
@@ -106,6 +107,8 @@ export default function DailyActionCenter() {
       const mains = list.filter((l) => isMainLocation(l.locationType)).map((l) => ({ ...l }));
       const totalBranchAdc = branches.reduce((a, b) => a + (b.adc || 0), 0);
       const reserve = totalBranchAdc * target;
+      const hospitalBalance=list.reduce((sum,row)=>sum+row.balance,0);
+      let unmet=0;
       mains.forEach((m) => { (m as any).coverageDays = totalBranchAdc > 0 ? m.balance / totalBranchAdc : null; });
       const branchState = branches.map((b) => ({ ...b }));
       const needs = branchState
@@ -182,7 +185,9 @@ export default function DailyActionCenter() {
             remaining -= give;
           }
         }
+        unmet+=Math.max(0,remaining);
       }
+      if(unmet>0&&hospitalPurchaseQuantity(hospitalBalance,totalBranchAdc,target)===0)out.push({id:`reserve:${recItemKey}`,section:'review',itemKey:recItemKey,itemName,tradeNames,itemCode,unit:s.unit,to:needs[0].loc.locationName,problem:'الرصيد الإجمالي يغطي الهدف، لكن بعض الفروع ناقصة وتحتاج مراجعة التوزيع.',action:'راجع أولوية توزيع الرصيد وسياسة احتياطي المخزن قبل طلب شراء إضافي.',why:`إجمالي الرصيد ${fmtNum(hospitalBalance)} واحتياج الهدف ${fmtNum(totalBranchAdc*target)}. هذا تنبيه مراجعة، وليس تحويلًا أو تغييرًا للاحتياطي.`,priority:'urgent',kind:'review_reserve_policy'});
 
       for (const b of branches) {
         const dead = b.issued === 0 && b.balance > 0;
@@ -273,6 +278,7 @@ export default function DailyActionCenter() {
     <div className="p-6 space-y-5">
       <header>
         <p>القرارات تحفظ في قاعدة البيانات وتدخل النسخ الاحتياطي. الحالة لا تغير المخزون؛ سجل الحركة الفعلية مرة واحدة من سجل الحركات.</p>
+        <p className="text-sm text-muted-fg">إجمالي المستشفى = المخزن + الفروع. احتياطي المخزن الحالي قيد على اقتراح التوزيع فقط؛ لا يضاف مرة ثانية إلى احتياج شراء المستشفى.</p>
         {actionError&&<p role="alert">{actionError}</p>}
         <div className="flex items-center justify-between gap-3 flex-wrap">
           <div>
